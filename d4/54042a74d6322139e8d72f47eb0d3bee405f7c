@@ -1,0 +1,14 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d454042a74d6322139e8d72f47eb0d3bee405f7c",
+  "prompts": {},
+  "humans": {
+    "h_98eff48b0cd4fb": {
+      "author": "chenyunfei.cs <chenyunfei.cs@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
