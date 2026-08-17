@@ -116,7 +116,8 @@ func HandlerFunc[REQ, RESP any](handle TypedHandlerFunc[REQ, RESP], opts ...Retu
 			Fail(w, err, opts...)
 			return
 		}
-		resp, err := handle(r.Context(), req)
+		ctx := withWriter(r.Context(), w)
+		resp, err := handle(ctx, req)
 		if err != nil {
 			Fail(w, err, opts...)
 			return

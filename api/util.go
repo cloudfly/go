@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -121,4 +122,14 @@ func Fail(w http.ResponseWriter, err error, opts ...ReturnOption) {
 		Code:    "InternalServerError",
 		Message: err.Error(),
 	})
+}
+
+type ctxKey string
+
+func Writer(ctx context.Context) http.ResponseWriter {
+	return ctx.Value(ctxKey("writer")).(http.ResponseWriter)
+}
+
+func withWriter(ctx context.Context, w http.ResponseWriter) context.Context {
+	return context.WithValue(ctx, ctxKey("writer"), w)
 }
