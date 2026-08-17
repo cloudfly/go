@@ -121,7 +121,7 @@ func Fail(w http.ResponseWriter, err error, opts ...ReturnOption) {
 	Return(w, responseBody{
 		Code:    "InternalServerError",
 		Message: err.Error(),
-	})
+	}, opts...)
 }
 
 type ctxKey string

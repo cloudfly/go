@@ -106,7 +106,7 @@ func wrapMiddleware(handler http.Handler, middlewares []Middleware) http.Handler
 	return handler
 }
 
-type TypedHandlerFunc[REQ, RESP any] func(context.Context, REQ) (*RESP, error)
+type TypedHandlerFunc[REQ, RESP any] func(context.Context, *REQ) (*RESP, error)
 
 func HandlerFunc[REQ, RESP any](handle TypedHandlerFunc[REQ, RESP], opts ...ReturnOption) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -117,7 +117,7 @@ func HandlerFunc[REQ, RESP any](handle TypedHandlerFunc[REQ, RESP], opts ...Retu
 			return
 		}
 		ctx := withWriter(r.Context(), w)
-		resp, err := handle(ctx, req)
+		resp, err := handle(ctx, &req)
 		if err != nil {
 			Fail(w, err, opts...)
 			return
