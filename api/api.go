@@ -90,6 +90,12 @@ func WithMiddleware(middlewares ...Middleware) Option {
 	}
 }
 
+func WithBasePath(path string) Option {
+	return func(srv *API) {
+		srv.pathPrefix = path
+	}
+}
+
 // Middleware wrap the http.HandlerFunc, so that it can handle the http.Request in advance and intercept the request if required(eg. authorization, logging)
 type Middleware func(http.Handler) http.Handler
 
@@ -100,7 +106,7 @@ func wrapMiddleware(handler http.Handler, middlewares []Middleware) http.Handler
 	return handler
 }
 
-type TypedHandlerFunc[REQ, RESP any] func(context.Context, REQ) (RESP, error)
+type TypedHandlerFunc[REQ, RESP any] func(context.Context, REQ) (*RESP, error)
 
 func HandlerFunc[REQ, RESP any](handle TypedHandlerFunc[REQ, RESP], opts ...ReturnOption) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -115,6 +121,8 @@ func HandlerFunc[REQ, RESP any](handle TypedHandlerFunc[REQ, RESP], opts ...Retu
 			Fail(w, err, opts...)
 			return
 		}
-		ReturnJSON(w, resp, opts...)
+		if resp != nil {
+			ReturnJSON(w, resp, opts...)
+		}
 	}
 }
