@@ -6,10 +6,19 @@ import (
 	"math/rand"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/cloudfly/go/base36"
 	"github.com/cloudfly/go/tools"
 )
+
+// Truncate 截断字符串，最多截断 limit 个 rune
+func Truncate(value string, limit int) string {
+	if utf8.RuneCountInString(value) <= limit {
+		return value
+	}
+	return string([]rune(value)[:limit])
+}
 
 // Equal 判断 2 个字符串数组是否相同
 // 不考虑排序情况，也就是说 [a,b] == [b,a]
