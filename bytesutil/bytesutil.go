@@ -13,6 +13,13 @@ func Resize(b []byte, n int) []byte {
 	return b[:n]
 }
 
+func Truncate(b []byte, limit int) []byte {
+	if len(b) <= limit {
+		return b
+	}
+	return b[:limit]
+}
+
 // ToUnsafeString converts b to string without memory allocations.
 //
 // The returned string is valid only until b is reachable and unmodified.
