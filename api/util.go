@@ -77,7 +77,7 @@ func Return(w http.ResponseWriter, data any, opts ...ReturnOption) {
 		w.Header().Set(k, v)
 	}
 	if option.contentType != "" {
-		w.Header().Set("ContentType", option.contentType)
+		w.Header().Set("Content-Type", option.contentType)
 	}
 
 	if data != nil {
