@@ -54,6 +54,9 @@ func (api *API) OPTION(path string, h http.Handler) {
 func (api *API) CONNECT(path string, h http.Handler) {
 	api.mux.Handle("CONNECT "+path, wrapMiddleware(h, api.middlewares))
 }
+func (api *API) Handle(pattern string, h http.Handler) {
+	api.mux.Handle(pattern, wrapMiddleware(h, api.middlewares))
+}
 
 // GROUP create a api group with custom url prefix and middlewares, the middlewares only works on handlers registerd on this group
 func (api *API) GROUP(path string, middlewares ...Middleware) *API {
@@ -127,3 +130,5 @@ func HandlerFunc[REQ, RESP any](handle TypedHandlerFunc[REQ, RESP], opts ...Retu
 		}
 	}
 }
+
+type Empty struct{}
