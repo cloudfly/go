@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"strings"
 
 	"github.com/cloudfly/go/binder"
 )
@@ -28,33 +29,37 @@ func (api *API) ANY(path string, h http.Handler) {
 	api.mux.Handle(path, wrapMiddleware(h, api.middlewares))
 }
 func (api *API) GET(path string, h http.Handler) {
-	api.mux.Handle("GET "+path, wrapMiddleware(h, api.middlewares))
+	api.mux.Handle("GET "+api.pathPrefix+path, wrapMiddleware(h, api.middlewares))
 }
 func (api *API) POST(path string, h http.Handler) {
-	api.mux.Handle("POST "+path, wrapMiddleware(h, api.middlewares))
+	api.mux.Handle("POST "+api.pathPrefix+path, wrapMiddleware(h, api.middlewares))
 }
 func (api *API) PUT(path string, h http.Handler) {
-	api.mux.Handle("PUT "+path, wrapMiddleware(h, api.middlewares))
+	api.mux.Handle("PUT "+api.pathPrefix+path, wrapMiddleware(h, api.middlewares))
 }
 func (api *API) PATCH(path string, h http.Handler) {
-	api.mux.Handle("PATCH "+path, wrapMiddleware(h, api.middlewares))
+	api.mux.Handle("PATCH "+api.pathPrefix+path, wrapMiddleware(h, api.middlewares))
 }
 func (api *API) DELETE(path string, h http.Handler) {
-	api.mux.Handle("DELETE "+path, wrapMiddleware(h, api.middlewares))
+	api.mux.Handle("DELETE "+api.pathPrefix+path, wrapMiddleware(h, api.middlewares))
 }
 func (api *API) TRACE(path string, h http.Handler) {
-	api.mux.Handle("TRACE "+path, wrapMiddleware(h, api.middlewares))
+	api.mux.Handle("TRACE "+api.pathPrefix+path, wrapMiddleware(h, api.middlewares))
 }
 func (api *API) HEAD(path string, h http.Handler) {
-	api.mux.Handle("HEAD "+path, wrapMiddleware(h, api.middlewares))
+	api.mux.Handle("HEAD "+api.pathPrefix+path, wrapMiddleware(h, api.middlewares))
 }
 func (api *API) OPTION(path string, h http.Handler) {
-	api.mux.Handle("OPTION "+path, wrapMiddleware(h, api.middlewares))
+	api.mux.Handle("OPTION "+api.pathPrefix+path, wrapMiddleware(h, api.middlewares))
 }
 func (api *API) CONNECT(path string, h http.Handler) {
-	api.mux.Handle("CONNECT "+path, wrapMiddleware(h, api.middlewares))
+	api.mux.Handle("CONNECT "+api.pathPrefix+path, wrapMiddleware(h, api.middlewares))
 }
 func (api *API) Handle(pattern string, h http.Handler) {
+	before, after, found := strings.Cut(pattern, " ")
+	if found {
+		pattern = before + " " + api.pathPrefix + after
+	}
 	api.mux.Handle(pattern, wrapMiddleware(h, api.middlewares))
 }
 
