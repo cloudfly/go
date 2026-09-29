@@ -8,61 +8,12 @@ import (
 	"reflect"
 )
 
-type returnOption struct {
-	contentType string
-	statusCode  int
-	errCode     string
-	header      map[string]string
-	marshaler   ResponseMarshaler
-}
-
-type ReturnOption func(*returnOption)
-
-func WithContentType(s string) ReturnOption {
-	return func(o *returnOption) {
-		if s != "" {
-			o.contentType = s
-		}
-	}
-}
-
-func WithStatusCode(code int) ReturnOption {
-	return func(o *returnOption) {
-		if code > 0 {
-			o.statusCode = code
-		}
-	}
-}
-
-func WithHeader(name, value string) ReturnOption {
-	return func(o *returnOption) {
-		if o.header == nil {
-			o.header = make(map[string]string)
-		}
-		o.header[name] = value
-	}
-}
-
-func WithMarshaler(marshaler ResponseMarshaler) ReturnOption {
-	return func(o *returnOption) {
-		if marshaler != nil {
-			o.marshaler = marshaler
-		}
-	}
-}
-
-func WithErrorCode(code string) ReturnOption {
-	return func(o *returnOption) {
-		o.errCode = code
-	}
-}
-
 // Return write the result and code into ResponseWriter
-func Return(w http.ResponseWriter, data any, opts ...ReturnOption) {
+func Return(w http.ResponseWriter, data any, opts ...HandleOption) {
 	var (
 		content []byte
 		err     error
-		option  = &returnOption{
+		option  = &handleOption{
 			contentType: "application/json",
 			statusCode:  200,
 			header:      make(map[string]string),
@@ -93,12 +44,12 @@ func Return(w http.ResponseWriter, data any, opts ...ReturnOption) {
 	w.Write(content)
 }
 
-func ReturnJSON(w http.ResponseWriter, data any, opts ...ReturnOption) {
+func ReturnJSON(w http.ResponseWriter, data any, opts ...HandleOption) {
 	opts = append(opts, WithContentType("application/json"))
 	Return(w, data, opts...)
 }
 
-func ReturnText(w http.ResponseWriter, data any, opts ...ReturnOption) {
+func ReturnText(w http.ResponseWriter, data any, opts ...HandleOption) {
 	opts = append(opts,
 		WithContentType("text/plain"),
 		WithMarshaler(
@@ -116,7 +67,7 @@ func ReturnText(w http.ResponseWriter, data any, opts ...ReturnOption) {
 	Return(w, data, opts...)
 }
 
-func Fail(w http.ResponseWriter, err error, opts ...ReturnOption) {
+func Fail(w http.ResponseWriter, err error, opts ...HandleOption) {
 	opts = append(opts, WithContentType("application/json"), WithMarshaler(json.Marshal))
 	Return(w, responseBody{
 		Code:    "InternalServerError",
@@ -133,3 +84,5 @@ func Writer(ctx context.Context) http.ResponseWriter {
 func withWriter(ctx context.Context, w http.ResponseWriter) context.Context {
 	return context.WithValue(ctx, ctxKey("writer"), w)
 }
+
+type Empty struct{}

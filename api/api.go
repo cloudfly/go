@@ -1,11 +1,8 @@
 package api
 
 import (
-	"context"
 	"net/http"
 	"strings"
-
-	"github.com/cloudfly/go/binder"
 )
 
 type API struct {
@@ -26,41 +23,55 @@ func New(opts ...Option) *API {
 }
 
 func (api *API) ANY(path string, h http.Handler) {
-	api.mux.Handle(path, wrapMiddleware(h, api.middlewares))
+	api.Handle(patternedHandler{path: path, Handler: h})
 }
+
 func (api *API) GET(path string, h http.Handler) {
-	api.mux.Handle("GET "+api.pathPrefix+path, wrapMiddleware(h, api.middlewares))
+	api.Handle(patternedHandler{method: "GET", path: path, Handler: h})
 }
+
 func (api *API) POST(path string, h http.Handler) {
-	api.mux.Handle("POST "+api.pathPrefix+path, wrapMiddleware(h, api.middlewares))
+	api.Handle(patternedHandler{method: "POST", path: path, Handler: h})
 }
+
 func (api *API) PUT(path string, h http.Handler) {
-	api.mux.Handle("PUT "+api.pathPrefix+path, wrapMiddleware(h, api.middlewares))
+	api.Handle(patternedHandler{method: "PUT", path: path, Handler: h})
 }
+
 func (api *API) PATCH(path string, h http.Handler) {
-	api.mux.Handle("PATCH "+api.pathPrefix+path, wrapMiddleware(h, api.middlewares))
+	api.Handle(patternedHandler{method: "PATCH", path: path, Handler: h})
 }
+
 func (api *API) DELETE(path string, h http.Handler) {
-	api.mux.Handle("DELETE "+api.pathPrefix+path, wrapMiddleware(h, api.middlewares))
+	api.Handle(patternedHandler{method: "DELETE", path: path, Handler: h})
 }
-func (api *API) TRACE(path string, h http.Handler) {
-	api.mux.Handle("TRACE "+api.pathPrefix+path, wrapMiddleware(h, api.middlewares))
-}
+
 func (api *API) HEAD(path string, h http.Handler) {
-	api.mux.Handle("HEAD "+api.pathPrefix+path, wrapMiddleware(h, api.middlewares))
+	api.Handle(patternedHandler{method: "HEAD", path: path, Handler: h})
 }
+
 func (api *API) OPTION(path string, h http.Handler) {
-	api.mux.Handle("OPTION "+api.pathPrefix+path, wrapMiddleware(h, api.middlewares))
+	api.Handle(patternedHandler{method: "OPTION", path: path, Handler: h})
 }
+
 func (api *API) CONNECT(path string, h http.Handler) {
-	api.mux.Handle("CONNECT "+api.pathPrefix+path, wrapMiddleware(h, api.middlewares))
+	api.Handle(patternedHandler{method: "CONNECT", path: path, Handler: h})
 }
-func (api *API) Handle(pattern string, h http.Handler) {
-	before, after, found := strings.Cut(pattern, " ")
-	if found {
-		pattern = before + " " + api.pathPrefix + after
+
+func (api *API) Handle(h http.Handler) {
+	var (
+		method = ""
+		path   = "/"
+	)
+
+	if v, ok := h.(interface{ Path() string }); ok {
+		path = v.Path()
 	}
-	api.mux.Handle(pattern, wrapMiddleware(h, api.middlewares))
+	if v, ok := h.(interface{ Method() string }); ok {
+		method = v.Method()
+	}
+
+	api.mux.Handle(strings.TrimSpace(method+" "+api.pathPrefix+path), wrapMiddleware(h, api.middlewares))
 }
 
 // GROUP create a api group with custom url prefix and middlewares, the middlewares only works on handlers registerd on this group
@@ -81,59 +92,3 @@ func (api *API) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 func (api *API) ListenAndServe(addr string) error {
 	return http.ListenAndServe(addr, api)
 }
-
-type Option func(*API)
-
-// WithNotFoundHandler specifics a http handler for 404 case.
-func WithNotFoundHandler(h http.Handler) Option {
-	return func(srv *API) {
-		srv.notFoundHandler = h
-	}
-}
-
-// WithMiddleware specifics middlewares for all the service handlers.
-func WithMiddleware(middlewares ...Middleware) Option {
-	return func(srv *API) {
-		srv.middlewares = middlewares
-	}
-}
-
-func WithBasePath(path string) Option {
-	return func(srv *API) {
-		srv.pathPrefix = path
-	}
-}
-
-// Middleware wrap the http.HandlerFunc, so that it can handle the http.Request in advance and intercept the request if required(eg. authorization, logging)
-type Middleware func(http.Handler) http.Handler
-
-func wrapMiddleware(handler http.Handler, middlewares []Middleware) http.Handler {
-	for i := len(middlewares) - 1; i >= 0; i-- {
-		handler = middlewares[i](handler)
-	}
-	return handler
-}
-
-type TypedHandlerFunc[REQ, RESP any] func(context.Context, *REQ) (*RESP, error)
-
-func HandlerFunc[REQ, RESP any](handle TypedHandlerFunc[REQ, RESP], opts ...ReturnOption) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var req REQ
-		err := binder.BindHttp(r, &req)
-		if err != nil {
-			Fail(w, err, opts...)
-			return
-		}
-		ctx := withWriter(r.Context(), w)
-		resp, err := handle(ctx, &req)
-		if err != nil {
-			Fail(w, err, opts...)
-			return
-		}
-		if resp != nil {
-			ReturnJSON(w, resp, opts...)
-		}
-	}
-}
-
-type Empty struct{}
