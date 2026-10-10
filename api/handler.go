@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/cloudfly/go/binder"
@@ -19,8 +20,13 @@ func Handler[REQ, RESP any](handle TypedHandlerFunc[REQ, RESP], opts ...HandleOp
 	}
 
 	functionName := runtime.FuncForPC(reflect.ValueOf(handle).Pointer()).Name()
-	if i := strings.LastIndexByte(functionName, '.'); i != -1 {
-		option.path = "/" + functionName[i:]
+	items := strings.Split(functionName, ".")
+	slices.Reverse(items)
+	for _, item := range items {
+		if !strings.HasPrefix(item, "func") { // this is a anonymous closure
+			option.path += "/" + item
+			break
+		}
 	}
 
 	for _, opt := range opts {

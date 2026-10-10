@@ -22,56 +22,65 @@ func New(opts ...Option) *API {
 	return srv
 }
 
-func (api *API) ANY(path string, h http.Handler) {
-	api.Handle(patternedHandler{path: path, Handler: h})
-}
-
 func (api *API) GET(path string, h http.Handler) {
-	api.Handle(patternedHandler{method: "GET", path: path, Handler: h})
+	api.Handle("", patternedHandler{method: "GET", path: path, Handler: h})
 }
 
 func (api *API) POST(path string, h http.Handler) {
-	api.Handle(patternedHandler{method: "POST", path: path, Handler: h})
+	api.Handle("", patternedHandler{method: "POST", path: path, Handler: h})
 }
 
 func (api *API) PUT(path string, h http.Handler) {
-	api.Handle(patternedHandler{method: "PUT", path: path, Handler: h})
+	api.Handle("", patternedHandler{method: "PUT", path: path, Handler: h})
 }
 
 func (api *API) PATCH(path string, h http.Handler) {
-	api.Handle(patternedHandler{method: "PATCH", path: path, Handler: h})
+	api.Handle("", patternedHandler{method: "PATCH", path: path, Handler: h})
 }
 
 func (api *API) DELETE(path string, h http.Handler) {
-	api.Handle(patternedHandler{method: "DELETE", path: path, Handler: h})
+	api.Handle("", patternedHandler{method: "DELETE", path: path, Handler: h})
 }
 
 func (api *API) HEAD(path string, h http.Handler) {
-	api.Handle(patternedHandler{method: "HEAD", path: path, Handler: h})
+	api.Handle("", patternedHandler{method: "HEAD", path: path, Handler: h})
 }
 
 func (api *API) OPTION(path string, h http.Handler) {
-	api.Handle(patternedHandler{method: "OPTION", path: path, Handler: h})
+	api.Handle("", patternedHandler{method: "OPTION", path: path, Handler: h})
 }
 
 func (api *API) CONNECT(path string, h http.Handler) {
-	api.Handle(patternedHandler{method: "CONNECT", path: path, Handler: h})
+	api.Handle("", patternedHandler{method: "CONNECT", path: path, Handler: h})
 }
 
-func (api *API) Handle(h http.Handler) {
+// HandlePath bind a handler to the given url path, the path can be in the format of "method path" or "path"
+//
+// The path would be '/' as default if left empty.
+func (api *API) Handle(path string, h http.Handler) {
 	var (
-		method = ""
-		path   = "/"
+		method  = ""
+		uriPath = "/"
 	)
-
-	if v, ok := h.(interface{ Path() string }); ok {
-		path = v.Path()
+	fields := strings.Fields(path)
+	if len(fields) == 0 {
+		if v, ok := h.(interface{ Path() string }); ok {
+			uriPath = v.Path()
+		}
+		if v, ok := h.(interface{ Method() string }); ok {
+			method = v.Method()
+		}
+	} else if len(fields) == 1 {
+		uriPath = fields[0]
+		if v, ok := h.(interface{ Method() string }); ok {
+			method = v.Method()
+		}
+	} else if len(fields) == 2 {
+		method = fields[0]
+		uriPath = fields[1]
 	}
-	if v, ok := h.(interface{ Method() string }); ok {
-		method = v.Method()
-	}
 
-	api.mux.Handle(strings.TrimSpace(method+" "+api.pathPrefix+path), wrapMiddleware(h, api.middlewares))
+	api.mux.Handle(strings.TrimSpace(method+" "+api.pathPrefix+uriPath), wrapMiddleware(h, api.middlewares))
 }
 
 // GROUP create a api group with custom url prefix and middlewares, the middlewares only works on handlers registerd on this group
