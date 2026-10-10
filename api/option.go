@@ -1,28 +1,8 @@
 package api
 
-import "net/http"
-
-type Option func(*API)
-
-// WithNotFoundHandler specifics a http handler for 404 case.
-func WithNotFoundHandler(h http.Handler) Option {
-	return func(srv *API) {
-		srv.notFoundHandler = h
-	}
-}
-
-// WithMiddleware specifics middlewares for all the service handlers.
-func WithMiddleware(middlewares ...Middleware) Option {
-	return func(srv *API) {
-		srv.middlewares = middlewares
-	}
-}
-
-func WithBasePath(path string) Option {
-	return func(srv *API) {
-		srv.pathPrefix = path
-	}
-}
+import (
+	"strings"
+)
 
 type handleOption struct {
 	contentType string
@@ -45,7 +25,17 @@ func WithMethod(method string) HandleOption {
 
 func WithPath(path string) HandleOption {
 	return func(o *handleOption) {
-		o.path = path
+		fields := strings.Fields(path)
+		if len(fields) == 0 {
+			o.path = "/"
+		} else if len(fields) == 1 {
+			o.path = fields[0]
+		} else if len(fields) == 2 {
+			o.method = fields[0]
+			o.path = fields[1]
+		} else {
+			panic("invalid handler path, must be in the format of 'method path' or 'path'")
+		}
 	}
 }
 

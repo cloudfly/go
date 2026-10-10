@@ -6,18 +6,14 @@ import (
 )
 
 type API struct {
-	mux             *http.ServeMux
-	notFoundHandler http.Handler
-	middlewares     []Middleware
-	pathPrefix      string
+	mux         *http.ServeMux
+	middlewares []Middleware
+	pathPrefix  string
 }
 
-func New(opts ...Option) *API {
+func New() *API {
 	srv := &API{
 		mux: http.NewServeMux(),
-	}
-	for _, opt := range opts {
-		opt(srv)
 	}
 	return srv
 }
@@ -83,13 +79,20 @@ func (api *API) Handle(path string, h http.Handler) {
 	api.mux.Handle(strings.TrimSpace(method+" "+api.pathPrefix+uriPath), wrapMiddleware(h, api.middlewares))
 }
 
+func (api *API) Use(middleware Middleware, others ...Middleware) *API {
+	api.middlewares = append(api.middlewares, middleware)
+	if len(others) > 0 {
+		api.middlewares = append(api.middlewares, others...)
+	}
+	return api
+}
+
 // GROUP create a api group with custom url prefix and middlewares, the middlewares only works on handlers registerd on this group
-func (api *API) GROUP(path string, middlewares ...Middleware) *API {
+func (api *API) GROUP(path string) *API {
 	return &API{
-		pathPrefix:      api.pathPrefix + path,
-		notFoundHandler: api.notFoundHandler,
-		mux:             api.mux,
-		middlewares:     append(append([]Middleware{}, api.middlewares...), middlewares...),
+		pathPrefix:  api.pathPrefix + path,
+		mux:         api.mux,
+		middlewares: append([]Middleware{}, api.middlewares...),
 	}
 }
 

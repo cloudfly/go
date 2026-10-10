@@ -13,7 +13,7 @@ import (
 
 type TypedHandlerFunc[REQ, RESP any] func(context.Context, *REQ) (*RESP, error)
 
-func Handler[REQ, RESP any](handle TypedHandlerFunc[REQ, RESP], opts ...HandleOption) http.Handler {
+func HandlerFunc[REQ, RESP any](handle TypedHandlerFunc[REQ, RESP], opts ...HandleOption) http.Handler {
 	var option = &handleOption{
 		method: "POST",
 		path:   "/",
