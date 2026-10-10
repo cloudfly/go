@@ -24,7 +24,7 @@ func HandlerFunc[REQ, RESP any](handle TypedHandlerFunc[REQ, RESP], opts ...Hand
 	slices.Reverse(items)
 	for _, item := range items {
 		if !strings.HasPrefix(item, "func") { // this is a anonymous closure
-			option.path += "/" + item
+			option.path += item
 			break
 		}
 	}
