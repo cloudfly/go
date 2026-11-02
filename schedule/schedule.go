@@ -264,7 +264,7 @@ func (sched *Scheduler) askForPreviewShards(ctx context.Context) error {
 }
 
 func (sched *Scheduler) raceShards(ctx context.Context) error {
-	// Reclaim expired leases directly; periodic cleanup is only housekeeping.
+	// Reclaim claimable shards directly; expired leases are handled by the claim CAS.
 	if _, err := sched.provider.Claim(ctx, sched.EndpointName, nil); err != nil {
 		return fmt.Errorf("claim claimable shards: %w", err)
 	}
@@ -378,8 +378,6 @@ func (sched *Scheduler) activate(ctx context.Context, lg *LeaseGuard, done chan 
 				// 续租成功，更新程序内部的租期时间
 				sched.applyShards(ctx, lg, lease.Shards)
 			}
-			// 顺带着清理 provider 里租期到期的 shard 归属
-			sched.reapExpired(ctx)
 		case <-inspections.C:
 			inspectCtx, cancel := context.WithTimeout(lg.ctx, sched.RenewInterval*3)
 			err := sched.inspect(inspectCtx)
@@ -396,15 +394,6 @@ func (sched *Scheduler) activate(ctx context.Context, lg *LeaseGuard, done chan 
 				sched.applyShards(ctx, lg, lease.Shards)
 			}
 		}
-	}
-}
-
-// reapExpired 清理已过期但无人接管的 shard。失败只记录日志，不影响续租。
-func (sched *Scheduler) reapExpired(parent context.Context) {
-	ctx, cancel := context.WithTimeout(parent, sched.RenewInterval)
-	defer cancel()
-	if _, err := sched.provider.Reap(ctx); err != nil && parent.Err() == nil {
-		sched.Logger.ErrorContext(ctx, "Failed to clear expired shard owners, %v", err)
 	}
 }
 

@@ -68,8 +68,6 @@ type ShardInfoProvider interface {
 	Renew(ctx context.Context, endpoint string) (Lease, error)
 	// Release 清空给定分片的归属并返回影响行数；已不是属主时视为成功。
 	Release(ctx context.Context, endpoint string, names []string) (int64, error)
-	// Reap 清理已过期但无人接管的归属，返回清理行数。
-	Reap(ctx context.Context) (int64, error)
 	// Request 记录转移意图，由当前属主在巡检时处理。
 	Request(ctx context.Context, endpoint string, name string) error
 	// OutgoingRequests 返回当前实例可处理的转移意图，仍需逐条 CAS 确认。

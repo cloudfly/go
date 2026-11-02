@@ -128,10 +128,6 @@ func (p *mysqlShardInfoProvider) Release(ctx context.Context, endpoint string, n
 	return released, nil
 }
 
-func (p *mysqlShardInfoProvider) Reap(ctx context.Context) (int64, error) {
-	return p.update(ctx, " SET processor = '', lease_until = NULL, transfer_to = '', transfer_until = NULL WHERE processor <> '' AND (lease_until IS NULL OR lease_until <= NOW(6))")
-}
-
 func (p *mysqlShardInfoProvider) Request(ctx context.Context, endpoint string, name string) error {
 	_, err := p.update(ctx, " SET transfer_to = ?, transfer_until = DATE_ADD(NOW(6), INTERVAL 120 SECOND) WHERE name = ? AND processor <> '' AND processor <> ? AND lease_until > NOW(6) AND (transfer_to = '' OR transfer_to = ? OR transfer_until IS NULL OR transfer_until <= NOW(6))", endpoint, name, endpoint, endpoint)
 	return err
