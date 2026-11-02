@@ -18,8 +18,8 @@ import (
 )
 
 const (
-	masterShardName = "s001"
-	ppeShardName    = "s000"
+	masterShardName  = "s001"
+	previewShardName = "s000"
 )
 
 var (
@@ -30,8 +30,7 @@ func init() {
 	hostname, _ := os.Hostname()
 	opt = Config{
 		EndpointName:      hostname,
-		NumShards:         20,
-		Labels:            make(map[string]string),
+		NumShards:         100,
 		RenewInterval:     time.Second * 3,
 		LeaseTTL:          time.Second * 10,
 		ReconcileInterval: 2 * time.Second,
@@ -44,7 +43,6 @@ func init() {
 type Config struct {
 	EndpointName string
 	NumShards    int
-	Labels       map[string]string
 	// RenewInterval is the renewal and database request timeout; defaults to 3s.
 	RenewInterval time.Duration
 	// LeaseTTL is the duration granted on claim, transfer and renewal; defaults to 10s.
@@ -61,7 +59,7 @@ type Config struct {
 	// WorkerConcurrency bounds concurrent lifecycle operations per lease generation,
 	// shared by all shards/loaders in this processor, default 32.
 	WorkerConcurrency int
-	PPE               bool
+	IsPreview         bool
 	// ShardInfoProvider 管理分片归属；为 nil 时使用内置的 MySQL 实现。
 	ShardInfoProvider ShardInfoProvider
 
@@ -210,7 +208,7 @@ func (sched *Scheduler) applyShards(ctx context.Context, lg *LeaseGuard, confirm
 	desired := make(map[string]ShardInfo)
 	if !lg.expired() && ctx.Err() == nil {
 		for _, shard := range confirmed {
-			if str.Contain(sched.shardNames, shard.Name) && (!sched.PPE || shard.Name == ppeShardName) {
+			if str.Contain(sched.shardNames, shard.Name) && (!sched.IsPreview || shard.Name == previewShardName) {
 				desired[shard.Name] = shard
 			}
 		}
@@ -231,17 +229,17 @@ func (sched *Scheduler) applyShards(ctx context.Context, lg *LeaseGuard, confirm
 	}
 }
 
-func (sched *Scheduler) askForPPEShards(ctx context.Context) error {
+func (sched *Scheduler) askForPreviewShards(ctx context.Context) error {
 	shards, err := sched.provider.List(ctx)
 	if err != nil {
 		return err
 	}
 
-	// 只保留 PPE 分片，释放当前实例持有的其他分片。
+	// 只保留 Preview 分片，释放当前实例持有的其他分片。
 	var stale []string
 	for _, shard := range shards {
-		if shard.Name != ppeShardName && shard.Processor == sched.EndpointName {
-			sched.Logger.InfoContext(ctx, "Leaving non-ppe shard")
+		if shard.Name != previewShardName && shard.Processor == sched.EndpointName {
+			sched.Logger.InfoContext(ctx, "Leaving non-preview shard")
 			stale = append(stale, shard.Name)
 		}
 	}
@@ -252,15 +250,15 @@ func (sched *Scheduler) askForPPEShards(ctx context.Context) error {
 	}
 
 	// Database-side CAS also accepts an expired owner; no local clock comparison.
-	claimed, err := sched.provider.Claim(ctx, []string{ppeShardName})
+	claimed, err := sched.provider.Claim(ctx, []string{previewShardName})
 	if err != nil {
-		return fmt.Errorf("race ppe shard error: %w", err)
+		return fmt.Errorf("race preview shard error: %w", err)
 	}
 	if claimed > 0 {
 		return nil
 	}
-	if err := sched.provider.Request(ctx, ppeShardName); err != nil {
-		return fmt.Errorf("ask ppe shard %s error: %w", ppeShardName, err)
+	if err := sched.provider.Request(ctx, previewShardName); err != nil {
+		return fmt.Errorf("ask preview shard %s error: %w", previewShardName, err)
 	}
 	return nil
 }
@@ -415,8 +413,8 @@ func (sched *Scheduler) inspect(ctx context.Context) error {
 	if err := sched.handleTransferRequests(ctx); err != nil {
 		return err
 	}
-	if sched.PPE {
-		return sched.askForPPEShards(ctx)
+	if sched.IsPreview {
+		return sched.askForPreviewShards(ctx)
 	}
 	return sched.raceShards(ctx)
 }
@@ -435,8 +433,8 @@ func (sched *Scheduler) handleTransferRequests(ctx context.Context) error {
 		}
 		shard := value.(*Shard)
 		if shard.ctx.Err() != nil ||
-			(sched.PPE && r.Name == ppeShardName) || // ppe shard 不能被转移
-			(r.Name != ppeShardName && time.Since(shard.boottime) < time.Minute) { // 启动 1 分钟内的 shard 不能被转移
+			(sched.IsPreview && r.Name == previewShardName) || // preview shard 不能被转移
+			(r.Name != previewShardName && time.Since(shard.boottime) < time.Minute) { // 启动 1 分钟内的 shard 不能被转移
 			continue
 		}
 		ok, err := sched.provider.TransferRequested(ctx, r.Name, r.Target)
@@ -473,11 +471,11 @@ func (sched *Scheduler) waitRelive(ctx context.Context, ticker *time.Ticker) (Le
 }
 
 func (sched *Scheduler) RandShard() string {
-	if sched.PPE {
-		return ppeShardName
+	if sched.IsPreview {
+		return previewShardName
 	}
 
-	// Choose directly from the non-PPE range; bounded retries can return s000.
+	// Choose directly from the non-Preview range; bounded retries can return s000.
 	return shardName(1 + rand.Intn(sched.NumShards-1))
 }
 
@@ -528,11 +526,6 @@ func normalizedOptions(option *Config) (Config, error) {
 	if !utf8.ValidString(config.EndpointName) || config.EndpointName == "" || utf8.RuneCountInString(config.EndpointName) > 64 || strings.HasSuffix(config.EndpointName, " ") {
 		return config, errors.New("EndpointName must be 1..64 UTF-8 characters without trailing spaces")
 	}
-	labels := make(map[string]string, len(config.Labels))
-	for key, value := range config.Labels {
-		labels[key] = value
-	}
-	config.Labels = labels
 	return config, nil
 }
 
@@ -546,9 +539,6 @@ func mergeOptions(option *Config, defaults Config) Config {
 	}
 	if config.NumShards == 0 {
 		config.NumShards = defaults.NumShards
-	}
-	if len(config.Labels) == 0 {
-		config.Labels = defaults.Labels
 	}
 	if config.RenewInterval == 0 {
 		config.RenewInterval = defaults.RenewInterval
@@ -568,8 +558,8 @@ func mergeOptions(option *Config, defaults Config) Config {
 	if config.WorkerConcurrency == 0 {
 		config.WorkerConcurrency = defaults.WorkerConcurrency
 	}
-	if !config.PPE {
-		config.PPE = defaults.PPE
+	if !config.IsPreview {
+		config.IsPreview = defaults.IsPreview
 	}
 	if config.Logger == nil {
 		config.Logger = defaults.Logger
