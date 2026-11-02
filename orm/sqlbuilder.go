@@ -3,6 +3,8 @@ package ormx
 import (
 	"fmt"
 	"strings"
+
+	"github.com/cloudfly/go/types"
 )
 
 // Cond collects the arguments of the where expressions built by WhereFrom* helpers.
@@ -17,7 +19,7 @@ func (c *Cond) add(expr string, args ...any) string {
 }
 
 func (c *Cond) E(column string, value any) string {
-	if value == nil {
+	if types.IsNil(value) {
 		return c.add(column + " IS NULL")
 	}
 

@@ -3,31 +3,29 @@ package ormx
 import (
 	"context"
 	"strings"
+	"sync/atomic"
 )
 
 type MetricHandler interface {
 	Emit(context.Context, string, bool)
 }
 
-var metricHandler MetricHandler
+var metricHandler atomic.Pointer[MetricHandler]
 
 func emitMetric(ctx context.Context, sql string) {
-	if metricHandler == nil {
+	h := metricHandler.Load()
+	if h == nil || *h == nil {
 		return
 	}
 
-	var (
-		table string
-		write bool
-	)
-
-	if i := strings.Index(sql, " FROM "); i > 0 {
-		write = false
+	write := false
+	if i := indexFold(sql, " FROM "); i > 0 {
+		write = indexFold(sql, "DELETE") >= 0
 		sql = strings.TrimSpace(sql[i+6:])
-	} else if j := strings.Index(sql, " INTO "); j > 0 {
+	} else if j := indexFold(sql, " INTO "); j > 0 {
 		write = true
 		sql = strings.TrimSpace(sql[j+6:])
-	} else if k := strings.Index(sql, "UPDATE "); k >= 0 {
+	} else if k := indexFold(sql, "UPDATE "); k >= 0 {
 		write = true
 		sql = strings.TrimSpace(sql[k+7:])
 	} else {
@@ -43,7 +41,7 @@ func emitMetric(ctx context.Context, sql string) {
 		sql = sql[i+1:]
 	}
 	if tableName != "" {
-		metricHandler.Emit(ctx, table, write)
+		(*h).Emit(ctx, tableName, write)
 	}
 	if sql != "" {
 		emitMetric(ctx, sql)
@@ -51,6 +49,22 @@ func emitMetric(ctx context.Context, sql string) {
 
 }
 
+// indexFold returns the index of substr in s, ignoring ASCII letter case.
+//
+// It scans the original string so the returned index can be used to slice s
+// without changing the case of identifiers such as table names.
+func indexFold(s, substr string) int {
+	for i := 0; i+len(substr) <= len(s); i++ {
+		if strings.EqualFold(s[i:i+len(substr)], substr) {
+			return i
+		}
+	}
+	return -1
+}
+
 func SetMetricHandler(h MetricHandler) {
-	metricHandler = h
+	if h == nil {
+		return
+	}
+	metricHandler.Store(&h)
 }

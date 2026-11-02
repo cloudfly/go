@@ -10,15 +10,18 @@ import (
 )
 
 // PatchByIDTx updates the data by id in the table using a transaction.
-func PatchByID(ctx context.Context, id any, data any, opt *Option) error {
+func PatchByID[ID comparable](ctx context.Context, id ID, data any, opt *Option) error {
 	if opt == nil {
 		opt = Opt(ctx)
 	}
-	ub, ok := NewUpdateBuilderFromStruct(data, opt)
+	ub, ok, err := NewUpdateBuilderFromStruct(data, opt)
+	if err != nil {
+		return err
+	}
 	if !ok {
 		return nil
 	}
-	conds := WhereFrom(opt.With(ctx), &ub.Cond, id, nil, opt)
+	conds := WhereFrom(&ub.Cond, id, nil, opt)
 	if len(conds) == 0 {
 		return fmt.Errorf("at least one filter condition in Update SQL")
 	}
@@ -26,16 +29,12 @@ func PatchByID(ctx context.Context, id any, data any, opt *Option) error {
 	var (
 		sql  string
 		args []any
-		err  error
 	)
 	sql, args = Build(ctx, ub)
 
-	if opt.tx == nil {
-		_, err = Exec(opt.With(ctx), sql, args...)
-	} else {
-		_, err = ExecTx(opt.With(ctx), opt.tx, sql, args...)
-	}
-	if opt.cacheProvider != nil {
+	_, err = Exec(opt.With(ctx), sql, args...)
+
+	if err == nil && opt.cacheProvider != nil {
 		opt.cacheProvider.Remove(ub.table, id)
 	}
 	return err
@@ -47,27 +46,26 @@ func PatchWhere(ctx context.Context, data any, filter any, opt *Option) (int64, 
 	if opt == nil {
 		opt = Opt(ctx)
 	}
-	ub, ok := NewUpdateBuilderFromStruct(data, opt)
+	ub, ok, err := NewUpdateBuilderFromStruct(data, opt)
+	if err != nil {
+		return 0, err
+	}
 	if !ok {
 		return 0, nil
 	}
-	conds := WhereFrom(opt.With(ctx), &ub.Cond, filter, nil, opt)
+	conds := WhereFrom(&ub.Cond, filter, nil, opt)
 	if len(conds) == 0 {
 		return 0, fmt.Errorf("at least one filter condition in Update SQL")
 	}
 	ub = ub.Where(conds...)
 	var (
-		err  error
 		sql  string
 		args []any
 		r    driver.Result
 	)
 	sql, args = Build(ctx, ub)
-	if opt.tx == nil {
-		r, err = Exec(opt.With(ctx), sql, args...)
-	} else {
-		r, err = ExecTx(opt.With(ctx), opt.tx, sql, args...)
-	}
+
+	r, err = Exec(opt.With(ctx), sql, args...)
 	if err != nil {
 		return 0, err
 	}
@@ -78,16 +76,19 @@ func PatchWhere(ctx context.Context, data any, filter any, opt *Option) (int64, 
 }
 
 // NewUpdateBuilderFromStruct 使用 data 数据定义 update builder
-func NewUpdateBuilderFromStruct(data any, opt *Option) (*UpdateBuilder, bool) {
+func NewUpdateBuilderFromStruct(data any, opt *Option) (*UpdateBuilder, bool, error) {
 	if data == nil {
-		return nil, false
+		return nil, false, nil
 	}
-	table := TableName(data, opt)
+	table, err := TableName(data, opt)
+	if err != nil {
+		return nil, false, err
+	}
 	ub := NewUpdateBuilder().Update(table)
 	v := dereferencedValue(reflect.ValueOf(data))
 	t := dereferencedType(reflect.TypeOf(data))
 	if t.Kind() != reflect.Struct {
-		return nil, false
+		return nil, false, nil
 	}
 	assigned := false
 	for i := 0; i < v.NumField(); i++ {
@@ -131,5 +132,5 @@ func NewUpdateBuilderFromStruct(data any, opt *Option) (*UpdateBuilder, bool) {
 		}
 		assigned = true
 	}
-	return ub, assigned
+	return ub, assigned, nil
 }

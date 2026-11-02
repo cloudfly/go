@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"regexp"
 	"strings"
 )
 
@@ -37,7 +38,7 @@ func WhereFromStruct(c *Cond, data any, dst []string, opt *Option) []string {
 	for i := 0; i < v.NumField(); i++ {
 		field := v.Field(i)
 		fieldType := t.Field(i)
-		if field.IsZero() {
+		if field.IsZero() && fieldType.Type.Kind() != reflect.Slice {
 			continue
 		}
 		name, after := ColNameFromTag(fieldType, getTagName(opt))
@@ -64,7 +65,7 @@ func WhereFromKVs(c *Cond, filter KVs, dst []string) []string {
 	return dst
 }
 
-func WhereFrom(ctx context.Context, c *Cond, filter any, dst []string, opt *Option) []string {
+func WhereFrom(c *Cond, filter any, dst []string, opt *Option) []string {
 	if filter == nil {
 		return dst
 	}
@@ -75,21 +76,15 @@ func WhereFrom(ctx context.Context, c *Cond, filter any, dst []string, opt *Opti
 	if kind := t.Kind(); kind == reflect.Struct {
 		return WhereFromStruct(c, filter, dst, opt)
 	} else if kind == reflect.Slice {
-		dst = append(dst, c.In(getPrimaryKey(Opt(ctx)), Any2Slice(filter)...))
+		dst = append(dst, c.In(getPrimaryKey(opt), Any2Slice(filter)...))
 	} else {
-		dst = append(dst, c.E(getPrimaryKey(Opt(ctx)), filter))
+		dst = append(dst, c.E(getPrimaryKey(opt), filter))
 	}
 	return dst
 }
 
 func appendWhereExpr(c *Cond, dst []string, column string, value any, op string) []string {
 	switch op {
-	case "":
-		if dereferencedType(reflect.TypeOf(value)).Kind() == reflect.Slice {
-			dst = append(dst, c.In(column, Any2Slice(value)...))
-		} else {
-			dst = append(dst, c.E(column, value))
-		}
 	case "e", "eq", "equal":
 		dst = append(dst, c.E(column, value))
 	case "ne", "neq":
@@ -103,11 +98,7 @@ func appendWhereExpr(c *Cond, dst []string, column string, value any, op string)
 	case "lte":
 		dst = append(dst, c.LessEqualThan(column, value))
 	case "in":
-		if values := Any2Slice(value); len(values) > 0 {
-			dst = append(dst, c.In(column, values...))
-		} else {
-			dst = append(dst, c.IsNull(column))
-		}
+		dst = append(dst, c.In(column, Any2Slice(value)...))
 	case "notin":
 		dst = append(dst, c.NotIn(column, Any2Slice(value)...))
 	case "like":
@@ -124,8 +115,30 @@ func appendWhereExpr(c *Cond, dst []string, column string, value any, op string)
 		}
 		sv = "%" + sv + "%"
 		dst = append(dst, c.NotLike(column, sv))
+	default:
+		if dereferencedType(reflect.TypeOf(value)).Kind() == reflect.Slice {
+			dst = append(dst, c.In(column, Any2Slice(value)...))
+		} else {
+			dst = append(dst, c.E(column, value))
+		}
 	}
 	return dst
+}
+
+var tableNamePattern = regexp.MustCompile(`^[A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)?$`)
+
+// ValidateTableName checks whether the table name can be used directly in SQL.
+//
+// The name must not be empty and may only contain ASCII letters, digits, '_' and '$',
+// optionally qualified by a single schema prefix such as "schema.table".
+func ValidateTableName(name string) error {
+	if name == "" {
+		return fmt.Errorf("ormx: table name is empty, use Option.Table() to set it")
+	}
+	if !tableNamePattern.MatchString(name) {
+		return fmt.Errorf("ormx: invalid table name %q", name)
+	}
+	return nil
 }
 
 // TableName auto recoganize the table name from data, it will auto prepend the tableNamePrefix which can be set by SetTableNamePrefix to the result.
@@ -133,7 +146,10 @@ func appendWhereExpr(c *Cond, dst []string, column string, value any, op string)
 //   - type of struct, it will use the struct name, and snake case it
 //   - type of string, return the name.
 //   - type of other, return fmt.Sprintf("%s", d)
-func TableName(d any, opt *Option) string {
+//
+// The returned name is validated by ValidateTableName; an error is returned when the
+// name is empty or not a valid identifier.
+func TableName(d any, opt *Option) (string, error) {
 	// generate table name from structure name of d
 	var (
 		name        string
@@ -145,7 +161,9 @@ func TableName(d any, opt *Option) string {
 		if opt.table != "" {
 			name = opt.table
 		}
-	} else if d != nil {
+	}
+
+	if name == "" && d != nil {
 		t := dereferencedElemType(reflect.TypeOf(d))
 		v := reflect.New(t).Interface()
 
@@ -164,27 +182,37 @@ func TableName(d any, opt *Option) string {
 	}
 
 	if name == "" {
-		return ""
-	} else if strings.HasPrefix(name, tablePrefix) {
+		return "", fmt.Errorf("ormx: table name is empty, use Option.Table() to set it")
+	}
+	if !strings.HasPrefix(name, tablePrefix) {
 		// try to prepend the table name prefix specified in option
-		return name
+		name = tablePrefix + name
 	}
 
-	return tablePrefix + name
+	if err := ValidateTableName(name); err != nil {
+		return "", err
+	}
+	return name, nil
 }
 
 // ColNamesWithTagOpt will column names from structure data, the type of d must be a struct, otherwise will return []string{}.
 //
 // ColNamesWithTagOpt will try to filter the filter the struct field which having <tag> specified in StructField.Tag if <tag> is not empty
-func ColNamesWithTagOpt(d interface{}, tag string, opt *Option) []string {
+func ColNamesWithTagOpt(d interface{}, tag string, opt *Option) ([]string, error) {
 	vt := reflect.TypeOf(d)
+	if vt == nil {
+		return []string{}, nil
+	}
 	if vt.Kind() == reflect.Ptr {
 		vt = vt.Elem()
 	}
 	if vt.Kind() != reflect.Struct {
-		return []string{}
+		return []string{}, nil
 	}
-	table := TableName(d, opt)
+	table, err := TableName(d, opt)
+	if err != nil {
+		return nil, err
+	}
 	var cols []string
 	for i := 0; i < vt.NumField(); i++ {
 		field := vt.Field(i)
@@ -201,7 +229,7 @@ func ColNamesWithTagOpt(d interface{}, tag string, opt *Option) []string {
 		}
 		cols = append(cols, table+"."+name)
 	}
-	return cols
+	return cols, nil
 }
 
 // snakeCase converts a CamelCase identifier to snake_case.

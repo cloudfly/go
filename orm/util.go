@@ -73,8 +73,10 @@ func dereferencedType(t reflect.Type) reflect.Type {
 }
 
 func dereferencedElemType(t reflect.Type) reflect.Type {
-	for k := t.Kind(); k == reflect.Ptr || k == reflect.Interface || k == reflect.Slice; k = t.Kind() {
+	k := t.Kind()
+	for k == reflect.Ptr || k == reflect.Array || k == reflect.Slice {
 		t = t.Elem()
+		k = t.Kind()
 	}
 	return t
 }

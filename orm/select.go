@@ -15,16 +15,16 @@ const (
 	DefaultCacheTTL = time.Second * 10
 )
 
-func GetByID(ctx context.Context, dst any, id any, opt *Option) error {
+func GetByID[ID comparable](ctx context.Context, dst any, id ID, opt *Option) error {
 	if opt == nil {
 		opt = Opt(ctx)
 	}
-	if id == nil {
-		return fmt.Errorf("id is required")
-	}
 
-	table := TableName(dst, opt)
-	if !opt.fromMaster && opt.cacheProvider != nil {
+	table, err := TableName(dst, opt)
+	if err != nil {
+		return err
+	}
+	if opt.tx == nil && !opt.fromMaster && opt.cacheProvider != nil {
 		// Not reading data from the primary database indicates that some delay is tolerable.
 		// Attempt to read from the cache provider.
 		if content, ok := opt.cacheProvider.Get(table, id); ok && len(content) > 0 {
@@ -38,7 +38,7 @@ func GetByID(ctx context.Context, dst any, id any, opt *Option) error {
 	if err != nil {
 		return fmt.Errorf("create select builder error:%w", err)
 	}
-	conds := WhereFrom(opt.With(ctx), &b.Cond, id, nil, opt)
+	conds := WhereFrom(&b.Cond, id, nil, opt)
 	if len(conds) == 0 {
 		return fmt.Errorf("at least one filter condition in Select SQL")
 	}
@@ -54,7 +54,9 @@ func GetByID(ctx context.Context, dst any, id any, opt *Option) error {
 		return err
 	}
 
-	if opt.cacheProvider != nil {
+	// Do not write cache inside a transaction: the transaction may roll back and
+	// leave uncommitted data in the cache.
+	if opt.tx == nil && opt.cacheProvider != nil {
 		content, err := json.Marshal(dst)
 		if err != nil {
 			slog.WarnContext(ctx, "Failed to marshal data for cacheing", "error", err, "query", statement, "args", args)
@@ -78,7 +80,7 @@ func GetWhere(ctx context.Context, dst any, filter any, opt *Option) error {
 	if len(opt.fields) > 0 {
 		builder = builder.Select(opt.fields...)
 	}
-	builder = builder.Where(WhereFrom(opt.With(ctx), &builder.Cond, filter, nil, opt)...)
+	builder = builder.Where(WhereFrom(&builder.Cond, filter, nil, opt)...)
 	sql, args := Build(ctx, builder)
 
 	return Get(opt.With(ctx), dst, sql, args...)
@@ -96,7 +98,7 @@ func SelectWhere(ctx context.Context, dst any, filter any, opt *Option) error {
 	if len(opt.fields) > 0 {
 		builder = builder.Select(opt.fields...)
 	}
-	builder = builder.Where(WhereFrom(opt.With(ctx), &builder.Cond, filter, nil, opt)...)
+	builder = builder.Where(WhereFrom(&builder.Cond, filter, nil, opt)...)
 
 	if len(opt.sorts) > 0 {
 		orderByCols := make([]string, 0, 8)
@@ -127,13 +129,16 @@ func Count(ctx context.Context, filter any, opt *Option) (int64, error) {
 		opt = Opt(ctx)
 	}
 	total := sql.NullInt64{}
-	table := TableName(filter, opt)
+	table, err := TableName(filter, opt)
+	if err != nil {
+		return 0, err
+	}
 	b := NewSelectBuilder().Select("COUNT(1) as total").From(table)
-	b = b.Where(WhereFrom(opt.With(ctx), &b.Cond, filter, nil, opt)...)
+	b = b.Where(WhereFrom(&b.Cond, filter, nil, opt)...)
 
 	sql, args := Build(ctx, b)
 
-	err := Get(opt.With(ctx), &total, sql, args...)
+	err = Get(opt.With(ctx), &total, sql, args...)
 	if IsNotFound(err) {
 		err = nil
 	}
@@ -149,9 +154,12 @@ func CountBy(ctx context.Context, dst any, filter any, group []string, opt *Opti
 	if len(group) > 0 {
 		cols = append(cols, group...)
 	}
-	table := TableName(filter, opt)
+	table, err := TableName(filter, opt)
+	if err != nil {
+		return err
+	}
 	b := NewSelectBuilder().Select(cols...).From(table)
-	b = b.Where(WhereFrom(opt.With(ctx), &b.Cond, filter, nil, opt)...)
+	b = b.Where(WhereFrom(&b.Cond, filter, nil, opt)...)
 
 	if len(group) > 0 {
 		b = b.GroupBy(group...)
@@ -159,7 +167,7 @@ func CountBy(ctx context.Context, dst any, filter any, group []string, opt *Opti
 
 	sql, args := Build(ctx, b)
 
-	err := Select(opt.With(ctx), dst, sql, args...)
+	err = Select(opt.With(ctx), dst, sql, args...)
 	if IsNotFound(err) {
 		err = nil
 	}
@@ -171,10 +179,13 @@ func Distinct(ctx context.Context, column string, filter any, opt *Option) ([]an
 	if opt == nil {
 		opt = Opt(ctx)
 	}
-	table := TableName(filter, opt)
+	table, err := TableName(filter, opt)
+	if err != nil {
+		return nil, err
+	}
 	builder := NewSelectBuilder().From(table)
 	builder = builder.Select(fmt.Sprintf("DISTINCT(%s) as %s", Escape(column), Escape(column)))
-	conds := WhereFrom(opt.With(ctx), &builder.Cond, filter, nil, opt)
+	conds := WhereFrom(&builder.Cond, filter, nil, opt)
 	builder = builder.Where(conds...)
 	sql, args := Build(ctx, builder)
 
@@ -191,12 +202,15 @@ func Exist(ctx context.Context, filter any, opt *Option) (bool, error) {
 		opt = Opt(ctx)
 	}
 	n := sql.NullInt64{}
-	table := TableName(filter, opt)
+	table, err := TableName(filter, opt)
+	if err != nil {
+		return false, err
+	}
 	b := NewSelectBuilder().Select("1").From(table).Limit(1)
-	b = b.Where(WhereFrom(opt.With(ctx), &b.Cond, filter, nil, opt)...)
+	b = b.Where(WhereFrom(&b.Cond, filter, nil, opt)...)
 
 	statement, args := Build(ctx, b)
-	err := Get(opt.With(ctx), &n, statement, args...)
+	err = Get(opt.With(ctx), &n, statement, args...)
 	if err != nil {
 		if IsNotFound(err) {
 			return false, nil
@@ -208,9 +222,9 @@ func Exist(ctx context.Context, filter any, opt *Option) (bool, error) {
 
 // NewSelectBuilderFromStruct create select sql builder by data
 func NewSelectBuilderFromStruct(data any, opt *Option) (*SelectBuilder, error) {
-	table := TableName(data, opt)
-	if table == "" {
-		return nil, fmt.Errorf("table is empty")
+	table, err := TableName(data, opt)
+	if err != nil {
+		return nil, err
 	}
 	b := NewSelectBuilder().From(table)
 	if data == nil {

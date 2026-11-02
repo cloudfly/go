@@ -18,7 +18,10 @@ func InsertIgnore(ctx context.Context, data []any, opt *Option) error {
 	var (
 		err error
 	)
-	table := TableName(data[0], opt)
+	table, err := TableName(data[0], opt)
+	if err != nil {
+		return err
+	}
 	ib, err := NewInsertBuilderFromStruct(ctx, data, opt)
 	if err != nil {
 		return fmt.Errorf("create insert builder from structure error: %w", err)
@@ -26,11 +29,7 @@ func InsertIgnore(ctx context.Context, data []any, opt *Option) error {
 	ib = ib.InsertIgnoreInto(table)
 	sql, args := Build(ctx, ib)
 
-	if opt.tx == nil {
-		_, err = Exec(opt.With(ctx), sql, args...)
-	} else {
-		_, err = ExecTx(opt.With(ctx), opt.tx, sql, args...)
-	}
+	_, err = Exec(opt.With(ctx), sql, args...)
 	if err != nil {
 		return fmt.Errorf("exec error: %w", err)
 	}
@@ -54,11 +53,7 @@ func InsertMany(ctx context.Context, data []any, opt *Option) error {
 	}
 	sql, args := Build(ctx, ib)
 
-	if opt.tx == nil {
-		_, err = Exec(opt.With(ctx), sql, args...)
-	} else {
-		_, err = ExecTx(opt.With(ctx), opt.tx, sql, args...)
-	}
+	_, err = Exec(opt.With(ctx), sql, args...)
 	if err != nil {
 		return fmt.Errorf("exec error: %w", err)
 	}
@@ -78,18 +73,18 @@ func Replace(ctx context.Context, data any, opt *Option) (int64, error) {
 		id  int64
 		r   driver.Result
 	)
+	table, err := TableName(data, opt)
+	if err != nil {
+		return 0, err
+	}
 	ib, err := NewInsertBuilderFromStruct(ctx, []any{data}, opt)
 	if err != nil {
 		return 0, fmt.Errorf("create insert builder from structure error: %w", err)
 	}
-	ib = ib.ReplaceInto(TableName(data, opt))
+	ib = ib.ReplaceInto(table)
 	sql, args := Build(ctx, ib)
 
-	if opt.tx == nil {
-		r, err = Exec(opt.With(ctx), sql, args...)
-	} else {
-		r, err = ExecTx(opt.With(ctx), opt.tx, sql, args...)
-	}
+	r, err = Exec(opt.With(ctx), sql, args...)
 	if err != nil {
 		return 0, fmt.Errorf("exec error: %w", err)
 	}
@@ -119,11 +114,7 @@ func InsertOne(ctx context.Context, data any, opt *Option) (int64, error) {
 	}
 	sql, args := Build(ctx, ib)
 
-	if opt.tx == nil {
-		r, err = Exec(opt.With(ctx), sql, args...)
-	} else {
-		r, err = ExecTx(opt.With(ctx), opt.tx, sql, args...)
-	}
+	r, err = Exec(opt.With(ctx), sql, args...)
 	if err != nil {
 		return 0, fmt.Errorf("exec error: %w", err)
 	}
@@ -139,6 +130,9 @@ func InsertOne(ctx context.Context, data any, opt *Option) (int64, error) {
 // such as: db:"columnName,insert" or db:",insert"
 //
 // the struct field with no insert tag option, will be ignored
+//
+// NewInsertBuilderFromStruct only use data[0] to resolve the table name and column names;
+// this means all the data type in data should be same.
 func NewInsertBuilderFromStruct(ctx context.Context, data []any, opt *Option) (*InsertBuilder, error) {
 	if len(data) <= 0 {
 		return nil, fmt.Errorf("no data to insert")
@@ -146,18 +140,22 @@ func NewInsertBuilderFromStruct(ctx context.Context, data []any, opt *Option) (*
 	if data[0] == nil {
 		return nil, fmt.Errorf("data[0] is nil")
 	}
-	table := TableName(data[0], opt)
-	if table == "" {
-		return nil, fmt.Errorf("unknown table name, use Opt(nil).Table() to set table")
+	table, err := TableName(data[0], opt)
+	if err != nil {
+		return nil, err
 	}
 
 	// 使用第一个数据的类型，获取列名信息。
 	var (
-		ib        = NewInsertBuilder().InsertInto(table)
-		t         = dereferencedType(reflect.TypeOf(data[0]))
-		cols      []string
-		fieldTags = make([]string, t.NumField())
+		ib   = NewInsertBuilder().InsertInto(table)
+		t    = dereferencedType(reflect.TypeOf(data[0]))
+		cols []string
 	)
+	if t.Kind() != reflect.Struct {
+		return nil, fmt.Errorf("data type must be struct")
+	}
+
+	fieldTags := make([]string, t.NumField())
 	for i := 0; i < t.NumField(); i++ {
 		fieldType := t.Field(i)
 		name, after := ColNameFromTag(fieldType, getTagName(opt))

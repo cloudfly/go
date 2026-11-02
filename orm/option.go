@@ -170,6 +170,13 @@ func (opt *Option) db(isMaster bool) (*DB, error) {
 }
 
 // With put the Option into context by Context.WithValue
+//
+// If the Option was shared among multiple goroutines, you should use Option.Copy() to create a copy of it before With().
+//
+//	opt.Copy().With(ctx)
 func (opt *Option) With(ctx context.Context) context.Context {
-	return context.WithValue(ctx, optionCtxKey{}, opt.Copy())
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, optionCtxKey{}, opt)
 }

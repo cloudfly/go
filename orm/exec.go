@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 )
 
 // RunTxContext execute a transiction
@@ -49,12 +50,11 @@ func RunTxWithOptionContext(ctx context.Context, opts *sql.TxOptions, f func(ctx
 
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("panic: %v", r)
-			tx.Rollback()
+			err = fmt.Errorf("panic: %v\n%s", r, debug.Stack())
+			err = errors.Join(err, tx.Rollback())
 		}
 		if ferr != nil {
-			err = ferr
-			tx.Rollback()
+			err = errors.Join(ferr, tx.Rollback())
 		}
 	}()
 
@@ -130,6 +130,9 @@ func runInTableLock(ctx context.Context, table, mode string, f func(ctx context.
 func Exec(ctx context.Context, sql string, args ...interface{}) (driver.Result, error) {
 	slog.InfoContext(ctx, "Executing sql query", "query", sql, "args", args)
 	emitMetric(ctx, sql)
+	if tx := Opt(ctx).GetTx(); tx != nil {
+		return tx.ExecContext(ctx, sql, args...)
+	}
 	if conn := connFromContext(ctx); conn != nil {
 		return conn.ExecContext(ctx, sql, args...)
 	}
@@ -138,13 +141,6 @@ func Exec(ctx context.Context, sql string, args ...interface{}) (driver.Result, 
 		return nil, err
 	}
 	return db.ExecContext(ctx, sql, args...)
-}
-
-// Exec execute a sql in transaction
-func ExecTx(ctx context.Context, tx *Tx, sql string, args ...interface{}) (driver.Result, error) {
-	slog.InfoContext(ctx, "Executing sql query", "query", sql, "args", args)
-	emitMetric(ctx, sql)
-	return tx.ExecContext(ctx, sql, args...)
 }
 
 // Select will query data into dest with raw sql and args.
@@ -158,6 +154,9 @@ func Select(ctx context.Context, dest interface{}, sql string, args ...interface
 		slog.DebugContext(ctx, "Selecting on slave", "query", sql, "args", args)
 	}
 	emitMetric(ctx, sql)
+	if tx := Opt(ctx).GetTx(); tx != nil {
+		return tx.SelectContext(ctx, dest, sql, args...)
+	}
 	if conn := connFromContext(ctx); conn != nil {
 		rows, err := conn.QueryContext(ctx, sql, args...)
 		if err != nil {
@@ -173,15 +172,6 @@ func Select(ctx context.Context, dest interface{}, sql string, args ...interface
 	return db.SelectContext(ctx, dest, sql, args...)
 }
 
-// Select will query data into dest with raw sql and args.
-//
-// it will auto query from master if the context having FromMaster
-func SelectTx(ctx context.Context, tx *Tx, dest interface{}, sql string, args ...interface{}) error {
-	slog.InfoContext(ctx, "Selecting in transaction", "query", sql, "args", args)
-	emitMetric(ctx, sql)
-	return tx.SelectContext(ctx, dest, sql, args...)
-}
-
 // Get will get one data into dest with raw sql and args.
 //
 // it will auto query from master if the context having FromMaster
@@ -193,6 +183,9 @@ func Get(ctx context.Context, dest interface{}, sql string, args ...interface{})
 		slog.DebugContext(ctx, "Getting on slave", "query", sql, "args", args)
 	}
 	emitMetric(ctx, sql)
+	if tx := Opt(ctx).GetTx(); tx != nil {
+		return tx.GetContext(ctx, dest, sql, args...)
+	}
 	if conn := connFromContext(ctx); conn != nil {
 		rows, err := conn.QueryContext(ctx, sql, args...)
 		if err != nil {
@@ -206,11 +199,4 @@ func Get(ctx context.Context, dest interface{}, sql string, args ...interface{})
 		return err
 	}
 	return db.GetContext(ctx, dest, sql, args...)
-}
-
-// Get will get one data from tx by using raw sql and args.
-func GetTx(ctx context.Context, tx *Tx, dest interface{}, sql string, args ...interface{}) error {
-	slog.InfoContext(ctx, "Getting in transaction", "query", sql, "args", args)
-	emitMetric(ctx, sql)
-	return tx.GetContext(ctx, dest, sql, args...)
 }
