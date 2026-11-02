@@ -32,6 +32,8 @@ func (t *Timestamp) Scan(src interface{}) error {
 	switch v := src.(type) {
 	case time.Time:
 		*t = Timestamp(v)
+	case []byte:
+		return t.UnmarshalJSON(v)
 	}
 	return nil
 }

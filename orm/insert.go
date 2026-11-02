@@ -12,6 +12,9 @@ func InsertIgnore(ctx context.Context, data []any, opt *Option) error {
 	if len(data) == 0 {
 		return nil
 	}
+	if opt == nil {
+		opt = Opt(ctx)
+	}
 	var (
 		err error
 	)
@@ -24,9 +27,9 @@ func InsertIgnore(ctx context.Context, data []any, opt *Option) error {
 	sql, args := Build(ctx, ib)
 
 	if opt.tx == nil {
-		_, err = Exec(ctx, sql, args...)
+		_, err = Exec(opt.With(ctx), sql, args...)
 	} else {
-		_, err = ExecTx(ctx, opt.tx, sql, args...)
+		_, err = ExecTx(opt.With(ctx), opt.tx, sql, args...)
 	}
 	if err != nil {
 		return fmt.Errorf("exec error: %w", err)
@@ -39,6 +42,9 @@ func InsertMany(ctx context.Context, data []any, opt *Option) error {
 	if len(data) == 0 {
 		return nil
 	}
+	if opt == nil {
+		opt = Opt(ctx)
+	}
 	var (
 		err error
 	)
@@ -49,9 +55,9 @@ func InsertMany(ctx context.Context, data []any, opt *Option) error {
 	sql, args := Build(ctx, ib)
 
 	if opt.tx == nil {
-		_, err = Exec(ctx, sql, args...)
+		_, err = Exec(opt.With(ctx), sql, args...)
 	} else {
-		_, err = ExecTx(ctx, opt.tx, sql, args...)
+		_, err = ExecTx(opt.With(ctx), opt.tx, sql, args...)
 	}
 	if err != nil {
 		return fmt.Errorf("exec error: %w", err)
@@ -63,6 +69,9 @@ func InsertMany(ctx context.Context, data []any, opt *Option) error {
 func Replace(ctx context.Context, data any, opt *Option) (int64, error) {
 	if data == nil {
 		return 0, nil
+	}
+	if opt == nil {
+		opt = Opt(ctx)
 	}
 	var (
 		err error
@@ -77,9 +86,9 @@ func Replace(ctx context.Context, data any, opt *Option) (int64, error) {
 	sql, args := Build(ctx, ib)
 
 	if opt.tx == nil {
-		r, err = Exec(ctx, sql, args...)
+		r, err = Exec(opt.With(ctx), sql, args...)
 	} else {
-		r, err = ExecTx(ctx, opt.tx, sql, args...)
+		r, err = ExecTx(opt.With(ctx), opt.tx, sql, args...)
 	}
 	if err != nil {
 		return 0, fmt.Errorf("exec error: %w", err)
@@ -96,6 +105,9 @@ func InsertOne(ctx context.Context, data any, opt *Option) (int64, error) {
 	if data == nil {
 		return 0, nil
 	}
+	if opt == nil {
+		opt = Opt(ctx)
+	}
 	var (
 		err error
 		id  int64
@@ -108,9 +120,9 @@ func InsertOne(ctx context.Context, data any, opt *Option) (int64, error) {
 	sql, args := Build(ctx, ib)
 
 	if opt.tx == nil {
-		r, err = Exec(ctx, sql, args...)
+		r, err = Exec(opt.With(ctx), sql, args...)
 	} else {
-		r, err = ExecTx(ctx, opt.tx, sql, args...)
+		r, err = ExecTx(opt.With(ctx), opt.tx, sql, args...)
 	}
 	if err != nil {
 		return 0, fmt.Errorf("exec error: %w", err)
@@ -131,7 +143,13 @@ func NewInsertBuilderFromStruct(ctx context.Context, data []any, opt *Option) (*
 	if len(data) <= 0 {
 		return nil, fmt.Errorf("no data to insert")
 	}
+	if data[0] == nil {
+		return nil, fmt.Errorf("data[0] is nil")
+	}
 	table := TableName(data[0], opt)
+	if table == "" {
+		return nil, fmt.Errorf("unknown table name, use Opt(nil).Table() to set table")
+	}
 
 	// 使用第一个数据的类型，获取列名信息。
 	var (
@@ -142,7 +160,7 @@ func NewInsertBuilderFromStruct(ctx context.Context, data []any, opt *Option) (*
 	)
 	for i := 0; i < t.NumField(); i++ {
 		fieldType := t.Field(i)
-		name, after := ColNameFromTag(fieldType, opt.tagName)
+		name, after := ColNameFromTag(fieldType, getTagName(opt))
 		if name == "" {
 			continue
 		}
@@ -165,6 +183,7 @@ func NewInsertBuilderFromStruct(ctx context.Context, data []any, opt *Option) (*
 
 	ib.Cols(cols...)
 
+	lines := 0
 	for _, item := range data {
 		var (
 			v    = dereferencedValue(reflect.ValueOf(item))
@@ -185,6 +204,11 @@ func NewInsertBuilderFromStruct(ctx context.Context, data []any, opt *Option) (*
 		}
 
 		ib.Values(vals...)
+		lines++
+	}
+
+	if lines == 0 {
+		return nil, fmt.Errorf("no values to insert")
 	}
 
 	return ib, nil

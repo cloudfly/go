@@ -17,10 +17,21 @@ func (c *Cond) add(expr string, args ...any) string {
 }
 
 func (c *Cond) E(column string, value any) string {
+	if value == nil {
+		return c.add(column + " IS NULL")
+	}
+
+	if s, ok := value.(Raw); ok {
+		return c.add(string(s))
+	}
+
 	return c.add(column+" = ?", value)
 }
 
 func (c *Cond) NE(column string, value any) string {
+	if value == nil {
+		return c.add(column + " IS NOT NULL")
+	}
 	return c.add(column+" <> ?", value)
 }
 
@@ -75,11 +86,7 @@ func Escape(identifier string) string {
 	return "`" + strings.ReplaceAll(identifier, "`", "``") + "`"
 }
 
-// Raw returns a raw SQL expression verbatim. Arguments are not bound; use
-// placeholders in the expression and bind them through the builder conditions.
-func Raw(expr string, args ...any) string {
-	return expr
-}
+type Raw string
 
 // SelectBuilder builds a SELECT statement.
 type SelectBuilder struct {
@@ -158,11 +165,11 @@ func (b *SelectBuilder) Build() (string, []any) {
 
 // InsertBuilder builds an INSERT/REPLACE statement.
 type InsertBuilder struct {
-	table   string
-	mode    string
-	cols    []string
-	values  [][]any
-	suffix  string
+	table  string
+	mode   string
+	cols   []string
+	values [][]any
+	suffix string
 }
 
 func NewInsertBuilder() *InsertBuilder {

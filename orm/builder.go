@@ -7,6 +7,11 @@ import (
 	"strings"
 )
 
+const (
+	DefaultPrimaryKey = "id"
+	DefaultTagName    = "db"
+)
+
 type Builder interface {
 	Build() (string, []any)
 }
@@ -26,13 +31,16 @@ func WhereFromStruct(c *Cond, data any, dst []string, opt *Option) []string {
 	if !v.IsValid() || v.IsZero() {
 		return []string{}
 	}
+	if t.Kind() != reflect.Struct {
+		return []string{}
+	}
 	for i := 0; i < v.NumField(); i++ {
 		field := v.Field(i)
 		fieldType := t.Field(i)
 		if field.IsZero() {
 			continue
 		}
-		name, after := ColNameFromTag(fieldType, opt.tagName)
+		name, after := ColNameFromTag(fieldType, getTagName(opt))
 		if name == "" {
 			continue
 		}
@@ -56,23 +64,7 @@ func WhereFromKVs(c *Cond, filter KVs, dst []string) []string {
 	return dst
 }
 
-func WhereFromIDs(c *Cond, idList []int64, dst []string) []string {
-	t := reflect.TypeOf(idList)
-	if t.Kind() == reflect.Slice {
-		dst = append(dst, c.In(gopt.primaryKey, Any2Slice(idList)...))
-	}
-	return dst
-}
-
-func WhereFromID(c *Cond, id int64, dst []string) []string {
-	t := reflect.TypeOf(id)
-	if t.Kind() == reflect.Slice {
-		dst = append(dst, c.E(gopt.primaryKey, id))
-	}
-	return dst
-}
-
-func WhereFrom(c *Cond, filter any, dst []string, opt *Option) []string {
+func WhereFrom(ctx context.Context, c *Cond, filter any, dst []string, opt *Option) []string {
 	if filter == nil {
 		return dst
 	}
@@ -83,9 +75,9 @@ func WhereFrom(c *Cond, filter any, dst []string, opt *Option) []string {
 	if kind := t.Kind(); kind == reflect.Struct {
 		return WhereFromStruct(c, filter, dst, opt)
 	} else if kind == reflect.Slice {
-		dst = append(dst, c.In(gopt.primaryKey, Any2Slice(filter)...))
+		dst = append(dst, c.In(getPrimaryKey(Opt(ctx)), Any2Slice(filter)...))
 	} else {
-		dst = append(dst, c.E(gopt.primaryKey, filter))
+		dst = append(dst, c.E(getPrimaryKey(Opt(ctx)), filter))
 	}
 	return dst
 }
@@ -126,7 +118,12 @@ func appendWhereExpr(c *Cond, dst []string, column string, value any, op string)
 		sv = "%" + sv + "%"
 		dst = append(dst, c.Like(column, sv))
 	case "notlike":
-		dst = append(dst, c.NotLike(column, value))
+		sv, ok := value.(string)
+		if !ok || len(sv) == 0 {
+			break
+		}
+		sv = "%" + sv + "%"
+		dst = append(dst, c.NotLike(column, sv))
 	}
 	return dst
 }
@@ -137,43 +134,43 @@ func appendWhereExpr(c *Cond, dst []string, column string, value any, op string)
 //   - type of string, return the name.
 //   - type of other, return fmt.Sprintf("%s", d)
 func TableName(d any, opt *Option) string {
-	// table was specified in option
-	if opt != nil && opt.table != "" {
-		return opt.table
-	}
-
-	// d is nil, return empty string
-	if d == nil {
-		return ""
-	}
-
-	t := dereferencedElemType(reflect.TypeOf(d))
-	v := reflect.New(t).Interface()
-
-	// d use Table() method to specify the table name
-	if tabler, ok := v.(interface{ Table() string }); ok {
-		return tabler.Table()
-	}
-
 	// generate table name from structure name of d
 	var (
-		name string
+		name        string
+		tablePrefix string
 	)
 
-	switch t.Kind() {
-	case reflect.Struct:
-		structName := t.Name()
-		name = snakeCase(structName)
-	default:
-		name = fmt.Sprintf("%s", d)
+	if opt != nil {
+		tablePrefix = opt.tablePrefix
+		if opt.table != "" {
+			name = opt.table
+		}
+	} else if d != nil {
+		t := dereferencedElemType(reflect.TypeOf(d))
+		v := reflect.New(t).Interface()
+
+		// d use Table() method to specify the table name
+		if tabler, ok := v.(interface{ Table() string }); ok {
+			name = tabler.Table()
+		} else {
+			switch t.Kind() {
+			case reflect.Struct:
+				structName := t.Name()
+				name = snakeCase(structName)
+			default:
+				name = fmt.Sprintf("%v", d)
+			}
+		}
 	}
 
-	// try to prepend the table name prefix specified in option
-	if opt == nil || strings.HasPrefix(name, opt.tablePrefix) {
+	if name == "" {
+		return ""
+	} else if strings.HasPrefix(name, tablePrefix) {
+		// try to prepend the table name prefix specified in option
 		return name
 	}
 
-	return opt.tablePrefix + name
+	return tablePrefix + name
 }
 
 // ColNamesWithTagOpt will column names from structure data, the type of d must be a struct, otherwise will return []string{}.
@@ -191,7 +188,7 @@ func ColNamesWithTagOpt(d interface{}, tag string, opt *Option) []string {
 	var cols []string
 	for i := 0; i < vt.NumField(); i++ {
 		field := vt.Field(i)
-		name, after := ColNameFromTag(field, opt.tagName)
+		name, after := ColNameFromTag(field, getTagName(opt))
 		if name == "" {
 			continue
 		}
@@ -235,7 +232,21 @@ func ColNameFromTag(field reflect.StructField, tagName string) (string, string) 
 	if name == "-" {
 		return "", ""
 	} else if name == "" {
-		return field.Name, after
+		return strings.ToLower(field.Name), after
 	}
 	return name, after
+}
+
+func getPrimaryKey(opt *Option) string {
+	if opt != nil && opt.primaryKey != "" {
+		return opt.primaryKey
+	}
+	return DefaultPrimaryKey
+}
+
+func getTagName(opt *Option) string {
+	if opt != nil && opt.tagName != "" {
+		return opt.tagName
+	}
+	return DefaultTagName
 }

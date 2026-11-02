@@ -27,7 +27,7 @@ func (d *DB) SelectContext(ctx context.Context, dest any, query string, args ...
 		return err
 	}
 	defer rows.Close()
-	return scanAll(rows, dest)
+	return scanAll(ctx, rows, dest)
 }
 
 // GetContext scans at most one row into dest.
@@ -37,7 +37,7 @@ func (d *DB) GetContext(ctx context.Context, dest any, query string, args ...any
 		return err
 	}
 	defer rows.Close()
-	return scanOne(rows, dest)
+	return scanOne(ctx, rows, dest)
 }
 
 // BeginTxx starts a transaction and returns an ormx.Tx.
@@ -61,7 +61,7 @@ func (t *Tx) SelectContext(ctx context.Context, dest any, query string, args ...
 		return err
 	}
 	defer rows.Close()
-	return scanAll(rows, dest)
+	return scanAll(ctx, rows, dest)
 }
 
 // GetContext scans at most one row into dest.
@@ -71,20 +71,20 @@ func (t *Tx) GetContext(ctx context.Context, dest any, query string, args ...any
 		return err
 	}
 	defer rows.Close()
-	return scanOne(rows, dest)
+	return scanOne(ctx, rows, dest)
 }
 
-func scanOne(rows *sql.Rows, dest any) error {
+func scanOne(ctx context.Context, rows *sql.Rows, dest any) error {
 	if !rows.Next() {
 		if err := rows.Err(); err != nil {
 			return err
 		}
 		return sql.ErrNoRows
 	}
-	return scanInto(rows, reflect.ValueOf(dest))
+	return scanInto(ctx, rows, reflect.ValueOf(dest))
 }
 
-func scanAll(rows *sql.Rows, dest any) error {
+func scanAll(ctx context.Context, rows *sql.Rows, dest any) error {
 	if dest == nil {
 		return fmt.Errorf("destination must be a non-nil pointer to a slice")
 	}
@@ -94,11 +94,11 @@ func scanAll(rows *sql.Rows, dest any) error {
 	}
 	// A scalar destination behaves like Get.
 	if _, ok := dest.(sql.Scanner); ok {
-		return scanOne(rows, dest)
+		return scanOne(ctx, rows, dest)
 	}
 	elem := dpv.Elem()
 	if elem.Kind() != reflect.Slice {
-		return scanOne(rows, dest)
+		return scanOne(ctx, rows, dest)
 	}
 
 	elemType := elem.Type().Elem()
@@ -124,7 +124,7 @@ func scanAll(rows *sql.Rows, dest any) error {
 			continue
 		}
 		ev := reflect.New(elemType)
-		if err := scanInto(rows, ev); err != nil {
+		if err := scanInto(ctx, rows, ev); err != nil {
 			return err
 		}
 		elem.Set(reflect.Append(elem, ev.Elem()))
@@ -132,7 +132,7 @@ func scanAll(rows *sql.Rows, dest any) error {
 	return rows.Err()
 }
 
-func scanInto(rows *sql.Rows, ptr reflect.Value) error {
+func scanInto(ctx context.Context, rows *sql.Rows, ptr reflect.Value) error {
 	if ptr.Kind() != reflect.Ptr || ptr.IsNil() {
 		return fmt.Errorf("scan destination must be a non-nil pointer")
 	}
@@ -154,17 +154,17 @@ func scanInto(rows *sql.Rows, ptr reflect.Value) error {
 		}
 	}
 	if v.Kind() == reflect.Struct {
-		return scanStruct(rows, v)
+		return scanStruct(ctx, rows, v)
 	}
 	return rows.Scan(ptr.Interface())
 }
 
-func scanStruct(rows *sql.Rows, v reflect.Value) error {
+func scanStruct(ctx context.Context, rows *sql.Rows, v reflect.Value) error {
 	columns, err := rows.Columns()
 	if err != nil {
 		return err
 	}
-	fields := structFields(v.Type())
+	fields := structFields(ctx, v.Type())
 	dests := make([]any, len(columns))
 	for i, column := range columns {
 		index, ok := fields[column]
@@ -199,25 +199,32 @@ func fieldByIndex(v reflect.Value, index []int) (reflect.Value, error) {
 	return v, nil
 }
 
-var fieldCache sync.Map // reflect.Type -> map[string][]int
+type fieldCacheKey struct {
+	typ     reflect.Type
+	tagName string
+}
 
-func structFields(t reflect.Type) map[string][]int {
-	if cached, ok := fieldCache.Load(t); ok {
+var fieldCache sync.Map // fieldCacheKey -> map[string][]int
+
+func structFields(ctx context.Context, t reflect.Type) map[string][]int {
+	key := fieldCacheKey{typ: t, tagName: getTagName(Opt(ctx))}
+	if cached, ok := fieldCache.Load(key); ok {
 		return cached.(map[string][]int)
 	}
 	fields := make(map[string][]int)
-	collectFields(t, nil, fields)
-	fieldCache.Store(t, fields)
+	collectFields(ctx, t, nil, fields)
+	fieldCache.Store(key, fields)
 	return fields
 }
 
-func collectFields(t reflect.Type, prefix []int, fields map[string][]int) {
+func collectFields(ctx context.Context, t reflect.Type, prefix []int, fields map[string][]int) {
 	for t.Kind() == reflect.Ptr {
 		t = t.Elem()
 	}
 	if t.Kind() != reflect.Struct {
 		return
 	}
+	tagName := getTagName(Opt(ctx))
 	for i := 0; i < t.NumField(); i++ {
 		field := t.Field(i)
 		if field.PkgPath != "" && !field.Anonymous {
@@ -227,7 +234,7 @@ func collectFields(t reflect.Type, prefix []int, fields map[string][]int) {
 		copy(index, prefix)
 		index[len(prefix)] = i
 
-		tag, hasTag := field.Tag.Lookup("db")
+		tag, hasTag := field.Tag.Lookup(tagName)
 		name, opts, _ := strings.Cut(tag, ",")
 		if name == "-" {
 			continue
@@ -238,7 +245,7 @@ func collectFields(t reflect.Type, prefix []int, fields map[string][]int) {
 		}
 		inline := (name == "" && strings.Contains(opts, "inline")) || (name == "" && !hasTag && field.Anonymous)
 		if inline && ft.Kind() == reflect.Struct {
-			collectFields(ft, index, fields)
+			collectFields(ctx, ft, index, fields)
 			continue
 		}
 		if name == "" {

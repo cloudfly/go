@@ -80,6 +80,9 @@ func dereferencedElemType(t reflect.Type) reflect.Type {
 }
 
 func Any2Slice(data any) []any {
+	if data == nil {
+		return []any{}
+	}
 	v := reflect.ValueOf(data)
 	t := reflect.TypeOf(data)
 	if t.Kind() != reflect.Slice {
@@ -92,8 +95,6 @@ func Any2Slice(data any) []any {
 	return iface
 }
 
-type M map[string]any
-
 type KV struct {
 	Key   string
 	Value any
@@ -105,11 +106,15 @@ type KVs []KV
 // KVsFromMap generate KVs from map
 func KVsFromMap(dst KVs, filter map[string]any) KVs {
 	for k, v := range filter {
-		switch reflect.TypeOf(v).Kind() {
-		case reflect.Slice:
-			dst = append(dst, KV{Key: k, Value: v, Extra: "in"})
-		default:
-			dst = append(dst, KV{Key: k, Value: v, Extra: "e"})
+		if v == nil {
+			dst = append(dst, KV{Key: k, Value: nil, Extra: "e"})
+		} else {
+			switch reflect.TypeOf(v).Kind() {
+			case reflect.Slice:
+				dst = append(dst, KV{Key: k, Value: v, Extra: "in"})
+			default:
+				dst = append(dst, KV{Key: k, Value: v, Extra: "e"})
+			}
 		}
 	}
 	return dst

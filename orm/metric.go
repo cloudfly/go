@@ -34,15 +34,21 @@ func emitMetric(ctx context.Context, sql string) {
 		return
 	}
 
-	tableName, subSQL, ok := strings.Cut(sql, " ")
-	if ok {
-		table = tableName
+	var tableName string
+	if i := strings.IndexByte(sql, ' '); i < 0 {
+		tableName = sql
+		sql = ""
 	} else {
-		emitMetric(ctx, subSQL)
-		return
+		tableName = sql[:i]
+		sql = sql[i+1:]
+	}
+	if tableName != "" {
+		metricHandler.Emit(ctx, table, write)
+	}
+	if sql != "" {
+		emitMetric(ctx, sql)
 	}
 
-	metricHandler.Emit(ctx, table, write)
 }
 
 func SetMetricHandler(h MetricHandler) {
