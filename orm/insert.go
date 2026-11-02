@@ -1,4 +1,4 @@
-package ormx
+package orm
 
 import (
 	"context"
@@ -7,14 +7,18 @@ import (
 	"reflect"
 )
 
-// InsertIgnore insert new data into database and ingore the rows on duplicate keys using transaction
-func InsertIgnore(ctx context.Context, data []any, opt *Option) error {
+// InsertIgnore 批量插入数据，使用 INSERT IGNORE，主键或唯一键冲突的行会被忽略。
+//
+// 表名和列名由 data[0] 决定，因此所有元素的类型必须一致。单条 SQL 执行，本身不开事务；
+// 需要事务请配合 RunTxContext 使用。
+//
+// 坑：data 为空时直接返回 nil（不会报错）；字段必须声明 `db:",insert"` 才会被写入，
+// 否则返回错误；完全为零值的结构体行会被静默跳过。
+func InsertIgnore(ctx context.Context, data []any, opts ...*Option) error {
 	if len(data) == 0 {
 		return nil
 	}
-	if opt == nil {
-		opt = Opt(ctx)
-	}
+	opt := optionFrom(ctx, opts)
 	var (
 		err error
 	)
@@ -36,14 +40,18 @@ func InsertIgnore(ctx context.Context, data []any, opt *Option) error {
 	return nil
 }
 
-// InsertMany insert rows in transaction, the all data type should be same structure.
-func InsertMany(ctx context.Context, data []any, opt *Option) error {
+// InsertMany 批量插入数据，生成一条多行 INSERT 语句。
+//
+// 所有元素的类型必须一致（表名和列名只从 data[0] 推导）。单条 SQL 执行，本身不开事务；
+// 需要事务请配合 RunTxContext 使用。
+//
+// 坑：data 为空时直接返回 nil；字段必须声明 `db:",insert"`；完全为零值的结构体行会被
+// 静默跳过；不同结构体类型的元素混用可能触发下标越界 panic。
+func InsertMany(ctx context.Context, data []any, opts ...*Option) error {
 	if len(data) == 0 {
 		return nil
 	}
-	if opt == nil {
-		opt = Opt(ctx)
-	}
+	opt := optionFrom(ctx, opts)
 	var (
 		err error
 	)
@@ -60,14 +68,17 @@ func InsertMany(ctx context.Context, data []any, opt *Option) error {
 	return nil
 }
 
-// Replace insert rows in transaction, the data type should be structure.
-func Replace(ctx context.Context, data any, opt *Option) (int64, error) {
+// Replace 使用 REPLACE INTO 写入单条数据，并返回自增主键。
+//
+// 表名和列名由 data 推导，字段必须声明 `db:",insert"`。
+//
+// 坑：REPLACE 遇到唯一键冲突时会先删除旧行再插入新行，会触发删除触发器、级联外键，
+// 并把未指定的列重置为默认值；通常应优先使用 INSERT ... ON DUPLICATE KEY UPDATE。
+func Replace(ctx context.Context, data any, opts ...*Option) (int64, error) {
 	if data == nil {
 		return 0, nil
 	}
-	if opt == nil {
-		opt = Opt(ctx)
-	}
+	opt := optionFrom(ctx, opts)
 	var (
 		err error
 		id  int64
@@ -95,14 +106,18 @@ func Replace(ctx context.Context, data any, opt *Option) (int64, error) {
 	return id, nil
 }
 
-// InsertOne insert rows in transaction, the data type should be structure.
-func InsertOne(ctx context.Context, data any, opt *Option) (int64, error) {
+// InsertOne 插入单条数据，并返回自增主键。
+//
+// data 必须是结构体（或结构体指针），字段必须声明 `db:",insert"`；未声明 insert 的字段
+// 不会被写入。单条 SQL 执行，本身不开事务。
+//
+// 坑：data 为 nil 时返回 (0, nil)，不会报错；零值字段会被正常写入（零值），但完全为
+// 零值的结构体会被 NewInsertBuilderFromStruct 判定为无数据并返回错误。
+func InsertOne(ctx context.Context, data any, opts ...*Option) (int64, error) {
 	if data == nil {
 		return 0, nil
 	}
-	if opt == nil {
-		opt = Opt(ctx)
-	}
+	opt := optionFrom(ctx, opts)
 	var (
 		err error
 		id  int64
@@ -125,21 +140,27 @@ func InsertOne(ctx context.Context, data any, opt *Option) (int64, error) {
 	return id, nil
 }
 
-// NewInsertBuilderFromStruct create a new insert builder from data, the struct field with 'insert' option in field tag will be inserted
+// NewInsertBuilderFromStruct 根据结构体创建 INSERT 构建器。
 //
-// such as: db:"columnName,insert" or db:",insert"
+// 只有 tag 中带 insert 选项的字段会被写入，例如 `db:"columnName,insert"` 或 `db:",insert"`；
+// 没有任何 insert 字段时返回错误。
 //
-// the struct field with no insert tag option, will be ignored
+// 表名和列名只从 data[0] 解析，因此所有元素必须是相同的结构体类型。
 //
-// NewInsertBuilderFromStruct only use data[0] to resolve the table name and column names;
-// this means all the data type in data should be same.
-func NewInsertBuilderFromStruct(ctx context.Context, data []any, opt *Option) (*InsertBuilder, error) {
+// 坑：
+//   - 完全为零值（v.IsZero()）的结构体行会被跳过；如果所有行都被跳过则返回
+//     "no values to insert"；
+//   - 单个字段为零值时仍会正常写入零值，不会跳过；
+//   - 字段 tag 中的 `type:timestamp` 会先做时间转换；
+//   - 指针为 nil 的字段会以类型化 nil 传入驱动，实际写入 NULL 还是报错取决于驱动。
+func NewInsertBuilderFromStruct(ctx context.Context, data []any, opts ...*Option) (*InsertBuilder, error) {
 	if len(data) <= 0 {
 		return nil, fmt.Errorf("no data to insert")
 	}
 	if data[0] == nil {
 		return nil, fmt.Errorf("data[0] is nil")
 	}
+	opt := optionFrom(ctx, opts)
 	table, err := TableName(data[0], opt)
 	if err != nil {
 		return nil, err
@@ -193,7 +214,9 @@ func NewInsertBuilderFromStruct(ctx context.Context, data []any, opt *Option) (*
 		for i := 0; i < v.NumField(); i++ {
 			field := v.Field(i)
 			if fieldTags[i] != "" {
-				if rv := dereferencedValue(field); rv.IsValid() && rv.CanInterface() {
+				if field.IsNil() {
+					vals = append(vals, nil)
+				} else if rv := dereferencedValue(field); rv.IsValid() && rv.CanInterface() {
 					vals = append(vals, convertValueByDBType(rv.Interface(), fieldTags[i]))
 				} else {
 					vals = append(vals, reflect.New(dereferencedType(field.Type())).Interface())

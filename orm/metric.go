@@ -1,4 +1,4 @@
-package ormx
+package orm
 
 import (
 	"context"
@@ -6,6 +6,14 @@ import (
 	"sync/atomic"
 )
 
+// MetricHandler 接收 SQL 执行指标回调。
+//
+// Emit 的第二个参数是 SQL 中解析出的表名，第三个参数表示是否为写操作（INSERT/UPDATE/
+// DELETE）。
+//
+// 坑：表名通过解析 SQL 文本得到，只适用于简单的单表语句；复杂语句（子查询、JOIN、
+// 注释、换行等）可能解析失败或得到错误表名。实现必须并发安全，且回调应尽量轻量，
+// 因为它在每次 Exec/Select/Get 时都会被调用。
 type MetricHandler interface {
 	Emit(context.Context, string, bool)
 }
@@ -62,6 +70,10 @@ func indexFold(s, substr string) int {
 	return -1
 }
 
+// SetMetricHandler 设置全局指标回调。
+//
+// 传入 nil 会被忽略（不会清除已有回调）；该设置是进程级全局状态，并发安全，但后设置
+// 的会覆盖先设置的。
 func SetMetricHandler(h MetricHandler) {
 	if h == nil {
 		return

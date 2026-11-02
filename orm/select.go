@@ -1,4 +1,4 @@
-package ormx
+package orm
 
 import (
 	"context"
@@ -12,13 +12,24 @@ import (
 )
 
 const (
+	// DefaultCacheTTL 是 GetByID 写入缓存时使用的默认过期时间。
 	DefaultCacheTTL = time.Second * 10
 )
 
-func GetByID[ID comparable](ctx context.Context, dst any, id ID, opt *Option) error {
-	if opt == nil {
-		opt = Opt(ctx)
-	}
+// GetByID 根据主键（默认 "id"，可通过 Option.PrimaryKey 修改）查询一行并扫描到 dst。
+//
+// 表名由 dst 的类型、Table() 方法或 opt.Table() 决定。当不在事务中且未指定
+// FromMaster 时，会先读缓存；缓存命中且 JSON 反序列化成功则直接返回，否则查库并在
+// 成功后写回缓存。缓存 TTL 见 DefaultCacheTTL。
+//
+// 坑：
+//   - dst 必须是结构体指针；缓存通过 encoding/json 读写，字段需可被 JSON 序列化；
+//   - 缓存反序列化失败会静默回退到数据库，不会报错；
+//   - 在事务中（opt.Tx）会跳过缓存读写，避免回滚后缓存出现脏数据；
+//   - 查询失败不会删除缓存，之后可能继续读到旧值；
+//   - id 的语义由 WhereFrom 决定：单值/切片是主键条件，结构体/KVs 则按字段生成条件。
+func GetByID[ID comparable](ctx context.Context, dst any, id ID, opts ...*Option) error {
+	opt := optionFrom(ctx, opts)
 
 	table, err := TableName(dst, opt)
 	if err != nil {
@@ -68,11 +79,15 @@ func GetByID[ID comparable](ctx context.Context, dst any, id ID, opt *Option) er
 	return nil
 }
 
-// GetWhere 使用自定义条件跟新数据
-func GetWhere(ctx context.Context, dst any, filter any, opt *Option) error {
-	if opt == nil {
-		opt = Opt(ctx)
-	}
+// GetWhere 根据自定义条件查询单行数据并扫描到 dst。
+//
+// filter 的用法见 WhereFrom。dst 必须是结构体指针；查询不到数据时返回错误，
+// 可用 IsNotFound 判断。
+//
+// 注意：本函数只取一行，不处理 Option.Sorts 和 Option.Page；需要排序/分页的列表查询
+// 请使用 SelectWhere。表名默认从 dst 推导，filter 不是结构体时可用 opt.Table 指定。
+func GetWhere(ctx context.Context, dst any, filter any, opts ...*Option) error {
+	opt := optionFrom(ctx, opts)
 	builder, err := NewSelectBuilderFromStruct(dst, opt)
 	if err != nil {
 		return fmt.Errorf("new select builder error: %w", err)
@@ -86,11 +101,17 @@ func GetWhere(ctx context.Context, dst any, filter any, opt *Option) error {
 	return Get(opt.With(ctx), dst, sql, args...)
 }
 
-// GetWhere 使用自定义条件跟新数据
-func SelectWhere(ctx context.Context, dst any, filter any, opt *Option) error {
-	if opt == nil {
-		opt = Opt(ctx)
-	}
+// SelectWhere 根据自定义条件查询多行数据并扫描到 dst。
+//
+// dst 必须是指向切片的指针。Option.Fields 可指定返回列，Option.Sorts 可指定排序
+// （前缀 "-" 表示降序），Option.Page 可指定分页（page 从 1 开始）。
+//
+// 坑：
+//   - 查询不到的“数据”不会报错，dst 为空切片；只有 SQL/扫描失败才返回错误；
+//   - Sorts 中的列名原样拼接，不做校验，请勿传入未受信任的字符串；
+//   - 表名默认从 dst 推导，filter 不是结构体时可用 opt.Table 指定。
+func SelectWhere(ctx context.Context, dst any, filter any, opts ...*Option) error {
+	opt := optionFrom(ctx, opts)
 	builder, err := NewSelectBuilderFromStruct(dst, opt)
 	if err != nil {
 		return fmt.Errorf("new select builder error: %w", err)
@@ -123,11 +144,15 @@ func SelectWhere(ctx context.Context, dst any, filter any, opt *Option) error {
 	return Select(opt.With(ctx), dst, sql, args...)
 }
 
-// Count select the count of rows in table which match the filter condition
-func Count(ctx context.Context, filter any, opt *Option) (int64, error) {
-	if opt == nil {
-		opt = Opt(ctx)
-	}
+// Count 统计表中满足 filter 的行数。
+//
+// filter 为 nil 或零值结构体时不会生成 WHERE，即统计全表。表名从 filter 推导，
+// 当 filter 是 KVs/map/单值时必须通过 opt.Table 显式指定表名（KVs 会被推导成 "kv"）。
+//
+// 坑：如果表名推导失败会直接返回错误，因此“无条件统计全表”也需要提供可推导表名的
+// 结构体或显式表名。
+func Count(ctx context.Context, filter any, opts ...*Option) (int64, error) {
+	opt := optionFrom(ctx, opts)
 	total := sql.NullInt64{}
 	table, err := TableName(filter, opt)
 	if err != nil {
@@ -145,11 +170,14 @@ func Count(ctx context.Context, filter any, opt *Option) (int64, error) {
 	return total.Int64, err
 }
 
-// Count select the count of rows in table which match the filter condition
-func CountBy(ctx context.Context, dst any, filter any, group []string, opt *Option) error {
-	if opt == nil {
-		opt = Opt(ctx)
-	}
+// CountBy 按 group 分组统计行数，并把结果扫描到 dst。
+//
+// dst 必须是指向切片的指针，结果中计数列名为 "_total"（整型），分组列按 group 顺序
+// 返回。group 为空时退化为总量统计。
+//
+// 表名从 filter 推导，filter 是 KVs/单值时需用 opt.Table 指定表名（KVs 会被推导成 "kv"）。
+func CountBy(ctx context.Context, dst any, filter any, group []string, opts ...*Option) error {
+	opt := optionFrom(ctx, opts)
 	cols := []string{"COUNT(1) as _total"}
 	if len(group) > 0 {
 		cols = append(cols, group...)
@@ -174,11 +202,15 @@ func CountBy(ctx context.Context, dst any, filter any, group []string, opt *Opti
 	return err
 }
 
-// Distinct fetch distinct values of the column in table
-func Distinct(ctx context.Context, column string, filter any, opt *Option) ([]any, error) {
-	if opt == nil {
-		opt = Opt(ctx)
-	}
+// Distinct 查询表中 column 去重后的值。
+//
+// 返回值是驱动层的原始类型（MySQL 的字符串通常是 []byte），需要按实际类型断言。
+// column 会经过 Escape 处理，作为标识符使用。
+//
+// 注意：结果不分页、不排序；filter 为 nil 时统计全表。表名从 filter 推导，
+// filter 是 KVs/单值时需用 opt.Table 指定（KVs 会被推导成 "kv"）。
+func Distinct(ctx context.Context, column string, filter any, opts ...*Option) ([]any, error) {
+	opt := optionFrom(ctx, opts)
 	table, err := TableName(filter, opt)
 	if err != nil {
 		return nil, err
@@ -196,11 +228,14 @@ func Distinct(ctx context.Context, column string, filter any, opt *Option) ([]an
 	return data, nil
 }
 
-// Exist return true if the at least one row found in table by using where condition
-func Exist(ctx context.Context, filter any, opt *Option) (bool, error) {
-	if opt == nil {
-		opt = Opt(ctx)
-	}
+// Exist 判断表中是否存在满足 filter 的行。
+//
+// 使用 "SELECT 1 ... LIMIT 1" 实现，不返回行内容。filter 为 nil 时等价于判断表中是否
+// 有任何数据。
+//
+// 表名从 filter 推导，filter 是 KVs/单值时需用 opt.Table 指定表名（KVs 会被推导成 "kv"）。
+func Exist(ctx context.Context, filter any, opts ...*Option) (bool, error) {
+	opt := optionFrom(ctx, opts)
 	n := sql.NullInt64{}
 	table, err := TableName(filter, opt)
 	if err != nil {
@@ -220,8 +255,17 @@ func Exist(ctx context.Context, filter any, opt *Option) (bool, error) {
 	return true, nil
 }
 
-// NewSelectBuilderFromStruct create select sql builder by data
-func NewSelectBuilderFromStruct(data any, opt *Option) (*SelectBuilder, error) {
+// NewSelectBuilderFromStruct 根据结构体推导表名和查询列，创建 SelectBuilder。
+//
+// 查询列规则：
+//   - data 为 nil 时使用 "*"；
+//   - data 必须是结构体（或其指针），否则返回错误；
+//   - 跳过 `db:"-"` 字段以及 tag 中带 `select:"-"`/`select:"false"` 的字段；
+//   - 没有可用列时回退为 "*"。
+//
+// 注意：返回的 Builder 只设置了 FROM 和 SELECT，调用方还需要自行设置 WHERE。
+func NewSelectBuilderFromStruct(data any, opts ...*Option) (*SelectBuilder, error) {
+	opt := optionFrom(nil, opts)
 	table, err := TableName(data, opt)
 	if err != nil {
 		return nil, err

@@ -1,4 +1,4 @@
-package ormx
+package orm
 
 import (
 	"context"
@@ -9,11 +9,19 @@ import (
 	"github.com/cloudfly/go/floats"
 )
 
-// PatchByIDTx updates the data by id in the table using a transaction.
-func PatchByID[ID comparable](ctx context.Context, id ID, data any, opt *Option) error {
-	if opt == nil {
-		opt = Opt(ctx)
-	}
+// PatchByID 根据主键更新一行数据。
+//
+// data 中的非零字段会作为 SET 内容，id 通过 WhereFrom 转换为 WHERE 条件（默认主键为
+// "id"）。表名从 data 推导。更新成功且配置了缓存时会调用 Remove 失效该行缓存。
+//
+// 坑：
+//   - 零值字段会被跳过，无法把列更新为 0/""/nil，需要置零请使用 PatchWhere + KVs 或
+//     自定义 SQL；
+//   - data 为 nil 或非结构体时直接返回 nil（不做任何更新）；
+//   - 没有任何可更新字段时同样返回 nil，不会报错；
+//   - 表名推导依赖 data，因此 data 不能是零值结构体（否则表名推导失败）。
+func PatchByID[ID comparable](ctx context.Context, id ID, data any, opts ...*Option) error {
+	opt := optionFrom(ctx, opts)
 	ub, ok, err := NewUpdateBuilderFromStruct(data, opt)
 	if err != nil {
 		return err
@@ -40,12 +48,18 @@ func PatchByID[ID comparable](ctx context.Context, id ID, data any, opt *Option)
 	return err
 }
 
-// PatchWhereTx updates the data that matchthe filter in the table using a transaction.
-// The filter is used as the condition and can be of type KVs, struct, []int64, int64.
-func PatchWhere(ctx context.Context, data any, filter any, opt *Option) (int64, error) {
-	if opt == nil {
-		opt = Opt(ctx)
-	}
+// PatchWhere 根据自定义条件更新数据，返回受影响的行数。
+//
+// data 中的非零字段会作为 SET 内容，filter 的用法见 WhereFrom（KVs、结构体、切片或
+// 单值）。表名从 data 推导。更新成功且配置了缓存时会调用 RemoveAll 清空该表缓存。
+//
+// 坑：
+//   - filter 为 nil 或零值结构体时无法生成条件，返回错误以避免更新全表（空切片会生成
+//     "0 = 1"，不报错但不会更新任何行）；
+//   - 零值字段会被跳过，无法把列更新为 0/""/nil；
+//   - filter 不是结构体时，表名仍需从 data 推导，必要时用 opt.Table 指定。
+func PatchWhere(ctx context.Context, data any, filter any, opts ...*Option) (int64, error) {
+	opt := optionFrom(ctx, opts)
 	ub, ok, err := NewUpdateBuilderFromStruct(data, opt)
 	if err != nil {
 		return 0, err
@@ -75,11 +89,26 @@ func PatchWhere(ctx context.Context, data any, filter any, opt *Option) (int64, 
 	return r.RowsAffected()
 }
 
-// NewUpdateBuilderFromStruct 使用 data 数据定义 update builder
-func NewUpdateBuilderFromStruct(data any, opt *Option) (*UpdateBuilder, bool, error) {
+// NewUpdateBuilderFromStruct 根据结构体的非零字段创建 UPDATE 构建器。
+//
+// 第二个返回值 ok 表示是否生成了 SET 条件：data 为 nil 或非结构体时返回
+// (nil, false, nil)，调用方通常应直接跳过执行。
+//
+// 字段 tag 选项：
+//   - `db:",incr"` / `db:",decr"`：生成自增/自减 1（字段值本身不参与 SQL）；
+//   - `db:",add:1.5"` / sub / mul / div：生成加减乘除常量表达式；
+//   - 其他字段生成 column = ?，值为字段当前值。
+//
+// 坑：
+//   - 零值字段会先被跳过，因此 incr/decr/add 等选项要求字段本身是非零占位值（通常填 1），
+//     否则整个字段不会进入 SET；
+//   - add/sub/mul/div 的值直接格式化进 SQL，非法数值会被静默忽略；
+//   - 若所有字段都是零值，返回的 builder 没有 SET 内容，执行会得到非法 SQL。
+func NewUpdateBuilderFromStruct(data any, opts ...*Option) (*UpdateBuilder, bool, error) {
 	if data == nil {
 		return nil, false, nil
 	}
+	opt := optionFrom(nil, opts)
 	table, err := TableName(data, opt)
 	if err != nil {
 		return nil, false, err

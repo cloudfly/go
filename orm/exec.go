@@ -1,4 +1,4 @@
-package ormx
+package orm
 
 import (
 	"context"
@@ -10,17 +10,29 @@ import (
 	"runtime/debug"
 )
 
-// RunTxContext execute a transiction
-func RunTxContext(ctx context.Context, f func(ctx context.Context, tx *Tx) error) error {
+// RunTxContext 在一个事务中执行 f，并在 f 返回后自动提交或回滚。
+//
+// 如果 ctx 中已经带有事务（通过 opt.Tx 或 Option.With 传入），本函数不会开启新事务，
+// 而是直接复用已有事务执行 f；MySQL 不支持嵌套事务，因此内层调用没有独立保存点。
+//
+// f 返回错误时回滚并把错误返回；f 内部 panic 时回滚并返回包含堆栈的错误。回滚错误会
+// 与业务错误通过 errors.Join 合并。
+//
+// 注意：事务使用主库连接；f 中应使用传入的 ctx 调用本包的 Exec/Select/Get，才能保证
+// 复用事务连接。
+func RunTxContext(ctx context.Context, f func(ctx context.Context) error) error {
 	return RunTxWithOptionContext(ctx, nil, f)
 }
 
-// RunTxContext execute a transiction with custom options
-func RunTxWithOptionContext(ctx context.Context, opts *sql.TxOptions, f func(ctx context.Context, tx *Tx) error) (err error) {
+// RunTxWithOptionContext 与 RunTxContext 相同，但可以指定 sql.TxOptions（隔离级别、
+// 只读等）。
+//
+// 如果 ctx 中已经在事务中，opts 会被忽略，直接复用已有事务。
+func RunTxWithOptionContext(ctx context.Context, opts *sql.TxOptions, f func(ctx context.Context) error) (err error) {
 	opt := Opt(ctx)
 	// already in transaction
 	if opt.tx != nil {
-		return f(ctx, opt.tx)
+		return f(ctx)
 	}
 
 	var (
@@ -58,7 +70,7 @@ func RunTxWithOptionContext(ctx context.Context, opts *sql.TxOptions, f func(ctx
 		}
 	}()
 
-	ferr = f(ctx, tx)
+	ferr = f(opt.Tx(tx).With(ctx))
 	if ferr != nil {
 		return err
 	}
@@ -67,16 +79,24 @@ func RunTxWithOptionContext(ctx context.Context, opts *sql.TxOptions, f func(ctx
 	return
 }
 
-// RunInLock executes f while holding a WRITE table lock.
+// RunInLock 在持有 WRITE 表锁（LOCK TABLES ... WRITE）时执行 f。
 //
-// MySQL's LOCK TABLES is session-scoped. The function therefore pins a single
-// connection and passes a context that routes ormx Exec/Get/Select/RunTx calls
-// through that connection.
+// MySQL 的 LOCK TABLES 是会话级锁。本函数会从连接池固定一条连接并加锁，然后把带有该
+// 连接的 ctx 传给 f；因此 f 内部必须使用传入的 ctx 调用本包的 Exec/Select/Get/RunTx，
+// 否则会换到其他连接，锁不再生效。
+//
+// 坑：
+//   - 不允许在事务内调用，也不支持嵌套加锁；
+//   - 锁只对使用同一连接的语句生效，其他连接/其他进程对同一张表的访问是否被阻塞取决于
+//     MySQL 的锁规则；
+//   - f 发生 panic 时仍会尝试释放锁，但 panic 不会被本函数恢复。
 func RunInLock(ctx context.Context, table string, f func(ctx context.Context) error) error {
 	return runInTableLock(ctx, table, "WRITE", f)
 }
 
-// RunInRLock executes f while holding a READ table lock.
+// RunInRLock 在持有 READ 表锁（LOCK TABLES ... READ）时执行 f。
+//
+// 约束与注意事项同 RunInLock：f 必须使用传入的 ctx，不支持嵌套，也不能在事务内调用。
 func RunInRLock(ctx context.Context, table string, f func(ctx context.Context) error) error {
 	return runInTableLock(ctx, table, "READ", f)
 }
@@ -93,13 +113,13 @@ func connFromContext(ctx context.Context) *sql.Conn {
 
 func runInTableLock(ctx context.Context, table, mode string, f func(ctx context.Context) error) (err error) {
 	if table == "" {
-		return fmt.Errorf("ormx: table is required")
+		return fmt.Errorf("orm: table is required")
 	}
 	if Opt(ctx).GetTx() != nil {
-		return fmt.Errorf("ormx: cannot lock tables inside a transaction")
+		return fmt.Errorf("orm: cannot lock tables inside a transaction")
 	}
 	if connFromContext(ctx) != nil {
-		return fmt.Errorf("ormx: nested table lock is not supported")
+		return fmt.Errorf("orm: nested table lock is not supported")
 	}
 
 	db, err := Opt(ctx).db(true)
@@ -126,7 +146,10 @@ func runInTableLock(ctx context.Context, table, mode string, f func(ctx context.
 	return f(context.WithValue(ctx, connCtxKey{}, conn))
 }
 
-// Exec execute a sql on master DB
+// Exec 在主库执行写 SQL，返回驱动结果。
+//
+// 执行连接的选取优先级：ctx 中的事务 > ctx 中的锁定连接 > 主库连接池。
+// sql 与 args 原样交给驱动，本函数不做任何校验或转义。
 func Exec(ctx context.Context, sql string, args ...interface{}) (driver.Result, error) {
 	slog.InfoContext(ctx, "Executing sql query", "query", sql, "args", args)
 	emitMetric(ctx, sql)
@@ -143,9 +166,16 @@ func Exec(ctx context.Context, sql string, args ...interface{}) (driver.Result, 
 	return db.ExecContext(ctx, sql, args...)
 }
 
-// Select will query data into dest with raw sql and args.
+// Select 执行查询并把所有行扫描到 dest。
 //
-// it will auto query from master if the context having FromMaster
+// dest 通常是指向切片的指针；如果 dest 是实现了 sql.Scanner 的类型，则会退化为只扫描
+// 一行（行为同 Get）。
+//
+// 连接选取优先级：ctx 中的事务 > ctx 中的锁定连接 > 连接池；未设置 FromMaster 时使用
+// 从库，否则使用主库。
+//
+// 坑：结构体扫描要求结果集的每一列都能在结构体中找到对应字段（默认按 tag 或字段名
+// 小写匹配），否则返回 "missing destination name" 错误。
 func Select(ctx context.Context, dest interface{}, sql string, args ...interface{}) error {
 	fromMaster := Opt(ctx).fromMaster
 	if fromMaster {
@@ -172,9 +202,14 @@ func Select(ctx context.Context, dest interface{}, sql string, args ...interface
 	return db.SelectContext(ctx, dest, sql, args...)
 }
 
-// Get will get one data into dest with raw sql and args.
+// Get 执行查询并把一行数据扫描到 dest。
 //
-// it will auto query from master if the context having FromMaster
+// 连接选取优先级：ctx 中的事务 > ctx 中的锁定连接 > 连接池；未设置 FromMaster 时使用
+// 从库，否则使用主库。
+//
+// 没有查到数据时返回 sql.ErrNoRows，可用 IsNotFound 判断。
+//
+// 坑：dest 必须是非 nil 指针；结构体扫描要求结果集的每一列都能匹配到字段，否则返回错误。
 func Get(ctx context.Context, dest interface{}, sql string, args ...interface{}) error {
 	fromMaster := Opt(ctx).fromMaster
 	if fromMaster {

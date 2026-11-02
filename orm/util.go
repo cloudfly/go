@@ -1,4 +1,4 @@
-package ormx
+package orm
 
 import (
 	"database/sql"
@@ -10,6 +10,19 @@ import (
 	"time"
 )
 
+// Any2Time 尝试把常见的时间表示转换为 time.Time。
+//
+// 支持：
+//   - 实现了 Time() time.Time 接口的值（如 sql.NullTime）；
+//   - 纯数字字符串；
+//   - float/int/uint/json.Number 等数值，按 Unix 秒解析。
+//
+// 数值会自动兼容毫秒/微秒/纳秒：当数值 >= 9000000000 时反复除以 10，直到落在秒级范围。
+//
+// 坑：
+//   - 数值 0 一律视为无效，返回 false，无法表示 1970-01-01；
+//   - 非纯数字字符串（如 "2024-01-01 00:00:00"）返回 false，不会尝试日期格式解析；
+//   - 该函数不做时区转换，返回的是本地时区的 time.Time。
 func Any2Time(i any) (time.Time, bool) {
 	if i == nil {
 		return time.Time{}, false
@@ -81,6 +94,10 @@ func dereferencedElemType(t reflect.Type) reflect.Type {
 	return t
 }
 
+// Any2Slice 把任意值转换为 []any。
+//
+// data 为 nil 时返回空切片；data 不是切片时返回只含该值的单元素切片；是切片时按原顺序
+// 展开一层（不会递归展开嵌套切片）。
 func Any2Slice(data any) []any {
 	if data == nil {
 		return []any{}
@@ -97,15 +114,26 @@ func Any2Slice(data any) []any {
 	return iface
 }
 
+// KV 表示一个列名到值的过滤条件。
+//
+// Extra 是条件操作符，支持 e/ne/gt/gte/lt/lte/in/notin/like/notlike；
+// 为空时，切片值生成 IN，其余生成 =。
 type KV struct {
 	Key   string
 	Value any
 	Extra string
 }
 
+// KVs 是 KV 的切片，可直接作为 GetWhere/PatchWhere/DeleteWhere 等函数的 filter，
+// 用于表达结构体过滤无法表达的零值条件（如 status=0）。
 type KVs []KV
 
-// KVsFromMap generate KVs from map
+// KVsFromMap 把 map 转换为 KVs，方便直接作为过滤条件。
+//
+// 值为 nil 时生成 IS NULL 条件；值为切片时使用 in 操作符；其余使用 = 操作符。
+//
+// 坑：Go 的 map 遍历顺序是随机的，生成的多个条件顺序不固定（对 AND 语义无影响，但
+// 生成的 SQL 文本不稳定）；需要固定顺序或自定义操作符时请直接构造 KVs。
 func KVsFromMap(dst KVs, filter map[string]any) KVs {
 	for k, v := range filter {
 		if v == nil {
@@ -122,12 +150,16 @@ func KVsFromMap(dst KVs, filter map[string]any) KVs {
 	return dst
 }
 
-// IsNotFound 判断查询错误是否是 未找到错误
+// IsNotFound 判断错误是否为“未找到数据”（sql.ErrNoRows）。
+//
+// 使用 errors.Is，因此经过包装的错误也能正确识别。
 func IsNotFound(err error) bool {
 	return errors.Is(err, sql.ErrNoRows)
 }
 
-// IsDuplicate 判断查询错误是否是 未找到错误
+// IsDuplicate 判断错误是否为 MySQL 唯一键冲突（Error 1062 Duplicate entry）。
+//
+// 实现方式是匹配错误字符串，不依赖具体驱动类型；换用非 MySQL 驱动时不可用。
 func IsDuplicate(err error) bool {
 	if err == nil {
 		return false
@@ -136,12 +168,17 @@ func IsDuplicate(err error) bool {
 	return strings.Contains(es, "Error 1062") && strings.Contains(es, "Duplicate entry")
 }
 
-// ParseOptionStr will decode key-value data from a string which format like k1:v1,k2:v2,k3:v3.
-// it will always return a non-nil value map
-// such as:
-//   - k1:v1,k2:v2 will parsed to {"k1":"v1","k2":"v2"}
-//   - k1,k2 will parsed to {"k1":"","k2":""}
-//   - k1:v2,k2 will parsed to {"k1":"v2","k2":""}
+// ParseOptionStr 解析形如 "k1:v1,k2:v2,k3:v3" 的选项字符串，始终返回非 nil 的 map。
+//
+// 示例：
+//   - "k1:v1,k2:v2" -> {"k1":"v1", "k2":"v2"}
+//   - "k1,k2"       -> {"k1":"", "k2":""}
+//   - "k1:v2,k2"    -> {"k1":"v2", "k2":""}
+//
+// 逗号可以用 "\," 转义后作为值的一部分。
+//
+// 坑：值中不能包含 ':'，第一个 ':' 之后的内容会作为值，后续 ':' 会被静默丢弃；
+// 空 key 会被忽略。
 func ParseOptionStr(str string) map[string]string {
 	options := map[string]string{}
 

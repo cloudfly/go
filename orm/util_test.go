@@ -1,4 +1,4 @@
-package ormx
+package orm
 
 import (
 	"reflect"
@@ -20,7 +20,7 @@ func TestDereferencedElemType(t *testing.T) {
 		type Test struct{}
 		var i any = &Test{}
 		tp := reflect.TypeOf(i)
-		if v := dereferencedElemType(tp).String(); v != "ormx.Test" {
+		if v := dereferencedElemType(tp).String(); v != "orm.Test" {
 			t.Errorf("dereferencedElemType(%v) = %v, want %v", tp.String(), v, "Test")
 		}
 	})
@@ -29,7 +29,7 @@ func TestDereferencedElemType(t *testing.T) {
 		type Test struct{}
 		var i []*Test = []*Test{&Test{}}
 		tp := reflect.TypeOf(i)
-		if v := dereferencedElemType(tp).String(); v != "ormx.Test" {
+		if v := dereferencedElemType(tp).String(); v != "orm.Test" {
 			t.Errorf("dereferencedElemType(%v) = %v, want %v", tp.String(), v, "Test")
 		}
 	})

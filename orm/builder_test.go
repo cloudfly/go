@@ -1,4 +1,4 @@
-package ormx
+package orm
 
 import (
 	"testing"
