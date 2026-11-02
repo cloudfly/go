@@ -244,20 +244,20 @@ func (sched *Scheduler) askForPreviewShards(ctx context.Context) error {
 		}
 	}
 	if len(stale) > 0 {
-		if _, err := sched.provider.Release(ctx, stale); err != nil {
+		if _, err := sched.provider.Release(ctx, sched.EndpointName, stale); err != nil {
 			return fmt.Errorf("leave shards %v error: %w", stale, err)
 		}
 	}
 
 	// Database-side CAS also accepts an expired owner; no local clock comparison.
-	claimed, err := sched.provider.Claim(ctx, []string{previewShardName})
+	claimed, err := sched.provider.Claim(ctx, sched.EndpointName, []string{previewShardName})
 	if err != nil {
 		return fmt.Errorf("race preview shard error: %w", err)
 	}
 	if claimed > 0 {
 		return nil
 	}
-	if err := sched.provider.Request(ctx, previewShardName); err != nil {
+	if err := sched.provider.Request(ctx, sched.EndpointName, previewShardName); err != nil {
 		return fmt.Errorf("ask preview shard %s error: %w", previewShardName, err)
 	}
 	return nil
@@ -265,7 +265,7 @@ func (sched *Scheduler) askForPreviewShards(ctx context.Context) error {
 
 func (sched *Scheduler) raceShards(ctx context.Context) error {
 	// Reclaim expired leases directly; periodic cleanup is only housekeeping.
-	if _, err := sched.provider.Claim(ctx, nil); err != nil {
+	if _, err := sched.provider.Claim(ctx, sched.EndpointName, nil); err != nil {
 		return fmt.Errorf("claim claimable shards: %w", err)
 	}
 	shards, err := sched.provider.List(ctx)
@@ -274,7 +274,7 @@ func (sched *Scheduler) raceShards(ctx context.Context) error {
 	}
 
 	for _, shard := range shardRequests(shards, sched.EndpointName, sched.NumShards, time.Now()) {
-		if err := sched.provider.Request(ctx, shard.Name); err != nil {
+		if err := sched.provider.Request(ctx, sched.EndpointName, shard.Name); err != nil {
 			return fmt.Errorf("ask shard %s: %w", shard.Name, err)
 		}
 	}
@@ -320,7 +320,7 @@ func shardRequests(shards []ShardInfo, endpoint string, total int, now time.Time
 func (sched *Scheduler) renewLease(parent context.Context) (Lease, error) {
 	ctx, cancel := context.WithTimeout(parent, sched.RenewInterval)
 	defer cancel()
-	lease, err := sched.provider.Renew(ctx)
+	lease, err := sched.provider.Renew(ctx, sched.EndpointName)
 	if err == nil && ctx.Err() != nil {
 		return Lease{}, ctx.Err()
 	}
@@ -422,7 +422,7 @@ func (sched *Scheduler) inspect(ctx context.Context) error {
 // handleTransferRequests 只处理本代次仍存活的本地分片。读取到的请求可能在
 // 处理前过期，最终 UPDATE 会重新校验，因此陈旧读取不会造成错误转移。
 func (sched *Scheduler) handleTransferRequests(ctx context.Context) error {
-	requests, err := sched.provider.OutgoingRequests(ctx)
+	requests, err := sched.provider.OutgoingRequests(ctx, sched.EndpointName)
 	if err != nil {
 		return err
 	}
@@ -437,7 +437,7 @@ func (sched *Scheduler) handleTransferRequests(ctx context.Context) error {
 			(r.Name != previewShardName && time.Since(shard.boottime) < time.Minute) { // 启动 1 分钟内的 shard 不能被转移
 			continue
 		}
-		ok, err := sched.provider.TransferRequested(ctx, r.Name, r.Target)
+		ok, err := sched.provider.TransferRequested(ctx, sched.EndpointName, r.Name, r.Target)
 		if err != nil {
 			return err
 		}

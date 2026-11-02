@@ -52,7 +52,7 @@ type TransferRequest struct {
 
 // ShardInfoProvider 管理分片归属。默认实现基于 MySQL；调用者可在
 // Option.ShardInfoProvider 中注入自定义实现。Scheduler 只通过该接口抢占、续租、
-// 转移和释放分片。
+// 转移和释放分片。endpoint 表示当前实例的身份，由 Scheduler 逐次传入。
 //
 // 所有方法都必须读写主库（或等价的权威存储），不得返回缓存快照：控制循环只有
 // 在 Renew 确认成功后才会启动本地分片。
@@ -63,17 +63,17 @@ type ShardInfoProvider interface {
 	List(ctx context.Context) ([]ShardInfo, error)
 	// Claim 以 CAS 抢占分片并返回成功行数。names 为空时抢占所有可抢占分片
 	// （未分配、无租约或租约已过期）；已持有有效租约的行保持不变。
-	Claim(ctx context.Context, names []string) (int64, error)
+	Claim(ctx context.Context, endpoint string, names []string) (int64, error)
 	// Renew 续租当前实例仍然有效的租约，返回已确认的分片与本地保守期限。
-	Renew(ctx context.Context) (Lease, error)
+	Renew(ctx context.Context, endpoint string) (Lease, error)
 	// Release 清空给定分片的归属并返回影响行数；已不是属主时视为成功。
-	Release(ctx context.Context, names []string) (int64, error)
+	Release(ctx context.Context, endpoint string, names []string) (int64, error)
 	// Reap 清理已过期但无人接管的归属，返回清理行数。
 	Reap(ctx context.Context) (int64, error)
 	// Request 记录转移意图，由当前属主在巡检时处理。
-	Request(ctx context.Context, name string) error
+	Request(ctx context.Context, endpoint string, name string) error
 	// OutgoingRequests 返回当前实例可处理的转移意图，仍需逐条 CAS 确认。
-	OutgoingRequests(ctx context.Context) ([]TransferRequest, error)
+	OutgoingRequests(ctx context.Context, endpoint string) ([]TransferRequest, error)
 	// TransferRequested 处理一条仍然有效的转移意图。
-	TransferRequested(ctx context.Context, name string, target string) (bool, error)
+	TransferRequested(ctx context.Context, endpoint string, name string, target string) (bool, error)
 }

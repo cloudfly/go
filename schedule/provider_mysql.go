@@ -14,7 +14,6 @@ import (
 type MySQLShardInfoProviderConfig struct {
 	ShardTableName string
 	LeaseTTL       time.Duration
-	EndpointName   string
 }
 
 // mysqlShardInfoProvider 是 ShardInfoProvider 的 MySQL 实现。
@@ -80,7 +79,7 @@ func (p *mysqlShardInfoProvider) List(ctx context.Context) ([]ShardInfo, error) 
 	return shards, nil
 }
 
-func (p *mysqlShardInfoProvider) Claim(ctx context.Context, names []string) (int64, error) {
+func (p *mysqlShardInfoProvider) Claim(ctx context.Context, endpoint string, names []string) (int64, error) {
 	if len(names) == 0 {
 		table, err := quotedTable(p.config.ShardTableName)
 		if err != nil {
@@ -108,7 +107,7 @@ func (p *mysqlShardInfoProvider) Claim(ctx context.Context, names []string) (int
 	}
 	var claimed int64
 	for _, name := range names {
-		n, err := p.update(ctx, " SET processor = ?, lease_until = DATE_ADD(NOW(6), INTERVAL ? MICROSECOND), transfer_to = '', transfer_until = NULL WHERE name = ? AND (processor = '' OR lease_until IS NULL OR lease_until <= NOW(6))", p.config.EndpointName, p.config.LeaseTTL.Microseconds(), name)
+		n, err := p.update(ctx, " SET processor = ?, lease_until = DATE_ADD(NOW(6), INTERVAL ? MICROSECOND), transfer_to = '', transfer_until = NULL WHERE name = ? AND (processor = '' OR lease_until IS NULL OR lease_until <= NOW(6))", endpoint, p.config.LeaseTTL.Microseconds(), name)
 		claimed += n
 		if err != nil {
 			return claimed, err
@@ -117,10 +116,10 @@ func (p *mysqlShardInfoProvider) Claim(ctx context.Context, names []string) (int
 	return claimed, nil
 }
 
-func (p *mysqlShardInfoProvider) Release(ctx context.Context, names []string) (int64, error) {
+func (p *mysqlShardInfoProvider) Release(ctx context.Context, endpoint string, names []string) (int64, error) {
 	var released int64
 	for _, name := range names {
-		n, err := p.update(ctx, " SET processor = '', lease_until = NULL, transfer_to = '', transfer_until = NULL WHERE name = ? AND processor = ?", name, p.config.EndpointName)
+		n, err := p.update(ctx, " SET processor = '', lease_until = NULL, transfer_to = '', transfer_until = NULL WHERE name = ? AND processor = ?", name, endpoint)
 		released += n
 		if err != nil {
 			return released, err
@@ -133,22 +132,22 @@ func (p *mysqlShardInfoProvider) Reap(ctx context.Context) (int64, error) {
 	return p.update(ctx, " SET processor = '', lease_until = NULL, transfer_to = '', transfer_until = NULL WHERE processor <> '' AND (lease_until IS NULL OR lease_until <= NOW(6))")
 }
 
-func (p *mysqlShardInfoProvider) Request(ctx context.Context, name string) error {
-	_, err := p.update(ctx, " SET transfer_to = ?, transfer_until = DATE_ADD(NOW(6), INTERVAL 120 SECOND) WHERE name = ? AND processor <> '' AND processor <> ? AND lease_until > NOW(6) AND (transfer_to = '' OR transfer_to = ? OR transfer_until IS NULL OR transfer_until <= NOW(6))", p.config.EndpointName, name, p.config.EndpointName, p.config.EndpointName)
+func (p *mysqlShardInfoProvider) Request(ctx context.Context, endpoint string, name string) error {
+	_, err := p.update(ctx, " SET transfer_to = ?, transfer_until = DATE_ADD(NOW(6), INTERVAL 120 SECOND) WHERE name = ? AND processor <> '' AND processor <> ? AND lease_until > NOW(6) AND (transfer_to = '' OR transfer_to = ? OR transfer_until IS NULL OR transfer_until <= NOW(6))", endpoint, name, endpoint, endpoint)
 	return err
 }
 
-func (p *mysqlShardInfoProvider) TransferRequested(ctx context.Context, name string, target string) (bool, error) {
-	n, err := p.transferRequested(ctx, name, target)
+func (p *mysqlShardInfoProvider) TransferRequested(ctx context.Context, endpoint string, name string, target string) (bool, error) {
+	n, err := p.transferRequested(ctx, endpoint, name, target)
 	return n > 0, err
 }
 
-func (p *mysqlShardInfoProvider) OutgoingRequests(ctx context.Context) ([]TransferRequest, error) {
+func (p *mysqlShardInfoProvider) OutgoingRequests(ctx context.Context, endpoint string) ([]TransferRequest, error) {
 	table, err := quotedTable(p.config.ShardTableName)
 	if err != nil {
 		return nil, err
 	}
-	sqlRows, err := p.db.QueryContext(ctx, "SELECT name, transfer_to FROM "+table+" WHERE processor = ? AND lease_until > NOW(6) AND transfer_to <> '' AND transfer_until > NOW(6)", p.config.EndpointName)
+	sqlRows, err := p.db.QueryContext(ctx, "SELECT name, transfer_to FROM "+table+" WHERE processor = ? AND lease_until > NOW(6) AND transfer_to <> '' AND transfer_until > NOW(6)", endpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -188,7 +187,7 @@ func quotedTable(name string) (string, error) {
 // statement start time in MySQL; checking expiry only in a SELECT FOR UPDATE
 // could revive a lease that expired while waiting for its row lock.
 // The final read confirms live IDs and measures their stored database deadlines.
-func (p *mysqlShardInfoProvider) Renew(ctx context.Context) (Lease, error) {
+func (p *mysqlShardInfoProvider) Renew(ctx context.Context, endpoint string) (Lease, error) {
 	db, config := p.db, p.config
 	table, err := quotedTable(config.ShardTableName)
 	if err != nil {
@@ -203,7 +202,7 @@ func (p *mysqlShardInfoProvider) Renew(ctx context.Context) (Lease, error) {
 	ttl := config.LeaseTTL.Microseconds()
 	var names []string
 	q := "SELECT name FROM " + table + " WHERE processor = ? FOR UPDATE"
-	rows, err := tx.QueryContext(ctx, q, config.EndpointName)
+	rows, err := tx.QueryContext(ctx, q, endpoint)
 	if err != nil {
 		return Lease{}, err
 	}
@@ -229,7 +228,7 @@ func (p *mysqlShardInfoProvider) Renew(ctx context.Context) (Lease, error) {
 		for _, name := range names {
 			args = append(args, name)
 		}
-		args = append(args, config.EndpointName)
+		args = append(args, endpoint)
 		q = "UPDATE " + table + " SET lease_until = DATE_ADD(NOW(6), INTERVAL ? MICROSECOND) WHERE name IN (" + marks + ") AND processor = ? AND lease_until > NOW(6)"
 		if _, err := tx.ExecContext(ctx, q, append([]any{ttl}, args...)...); err != nil {
 			return Lease{}, err
@@ -300,11 +299,11 @@ func (p *mysqlShardInfoProvider) updateUsing(ctx context.Context, exec sqlExecer
 	return r.RowsAffected()
 }
 
-func (p *mysqlShardInfoProvider) transferRequested(ctx context.Context, name string, target string) (int64, error) {
+func (p *mysqlShardInfoProvider) transferRequested(ctx context.Context, endpoint string, name string, target string) (int64, error) {
 	if !utf8.ValidString(target) || target == "" || utf8.RuneCountInString(target) > 64 || strings.HasSuffix(target, " ") {
 		return 0, fmt.Errorf("target processor must be 1..64 UTF-8 characters without trailing spaces")
 	}
-	if target == p.config.EndpointName {
+	if target == endpoint {
 		return 0, nil
 	}
 	table, err := quotedTable(p.config.ShardTableName)
@@ -318,7 +317,7 @@ func (p *mysqlShardInfoProvider) transferRequested(ctx context.Context, name str
 	defer tx.Rollback()
 	// As with renewal, evaluate expiry after any ownership lock wait.
 	var lockedName string
-	err = tx.QueryRowContext(ctx, "SELECT name FROM "+table+" WHERE name = ? AND processor = ? FOR UPDATE", name, p.config.EndpointName).Scan(&lockedName)
+	err = tx.QueryRowContext(ctx, "SELECT name FROM "+table+" WHERE name = ? AND processor = ? FOR UPDATE", name, endpoint).Scan(&lockedName)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}
@@ -326,7 +325,7 @@ func (p *mysqlShardInfoProvider) transferRequested(ctx context.Context, name str
 		return 0, err
 	}
 	tail := " SET processor = ?, lease_until = DATE_ADD(NOW(6), INTERVAL ? MICROSECOND), transfer_time = NOW(6), transfer_to = '', transfer_until = NULL WHERE name = ? AND processor = ? AND lease_until > NOW(6)"
-	args := []any{target, p.config.LeaseTTL.Microseconds(), name, p.config.EndpointName}
+	args := []any{target, p.config.LeaseTTL.Microseconds(), name, endpoint}
 	tail += " AND transfer_to = ? AND transfer_until > NOW(6)"
 	args = append(args, target)
 	n, err := p.updateUsing(ctx, tx, tail, args...)
