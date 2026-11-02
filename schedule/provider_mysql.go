@@ -276,14 +276,14 @@ func (p *mysqlShardInfoProvider) Renew(ctx context.Context, endpoint string) (Le
 // Ownership mutations share the same quoted table and database clock. Keeping
 // them on the provider also lets SQL contract tests run without a global database.
 func (p *mysqlShardInfoProvider) update(ctx context.Context, tail string, args ...any) (int64, error) {
-	return p.updateUsing(ctx, p.db, tail, args...)
+	return p.exec(ctx, p.db, tail, args...)
 }
 
 type sqlExecer interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 }
 
-func (p *mysqlShardInfoProvider) updateUsing(ctx context.Context, exec sqlExecer, tail string, args ...any) (int64, error) {
+func (p *mysqlShardInfoProvider) exec(ctx context.Context, exec sqlExecer, tail string, args ...any) (int64, error) {
 	table, err := quotedTable(p.config.ShardTableName)
 	if err != nil {
 		return 0, err
@@ -324,7 +324,7 @@ func (p *mysqlShardInfoProvider) transferRequested(ctx context.Context, endpoint
 	args := []any{target, p.config.LeaseTTL.Microseconds(), name, endpoint}
 	tail += " AND transfer_to = ? AND transfer_until > NOW(6)"
 	args = append(args, target)
-	n, err := p.updateUsing(ctx, tx, tail, args...)
+	n, err := p.exec(ctx, tx, tail, args...)
 	if err != nil {
 		return 0, err
 	}
