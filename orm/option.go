@@ -1,12 +1,13 @@
 // Package orm 是一个基于 database/sql 的轻量 MySQL ORM。
 //
 // 基本使用步骤：
-//  1. 通过 InitGlobalOption 或调用参数传入 Option，其中必须设置 DBProvider；
+//  1. 通过 SetGlobalOption 设置全局 Option，或通过 Option.With(ctx) 把自定义 Option
+//     放入 context，其中必须设置 DBProvider；
 //  2. 结构体字段使用 `db` tag 描述列名与行为，例如 `db:"name"`、`db:",insert"`；
 //  3. 调用 GetByID/GetWhere/InsertOne/PatchByID/DeleteByID 等函数完成增删改查。
 //
-// 所有查询函数在 opt == nil 时会从 ctx 中读取 Option（见 Opt），因此可以通过
-// Option.With(ctx) 在调用链中透传配置，而不必逐层传递 opt。
+// 所有查询/构建函数只接收 context.Context，并从 ctx 中读取 Option（见 Opt），
+// 因此可以通过 Option.With(ctx) 在调用链中透传配置。
 package orm
 
 import (
@@ -15,6 +16,8 @@ import (
 	"fmt"
 	"sync/atomic"
 	"time"
+
+	"github.com/cloudfly/go/types"
 )
 
 // CacheProvider 是 GetByID 使用的缓存抽象。
@@ -46,22 +49,26 @@ type DBProvider func(isMaster bool) *sql.DB
 
 var gopt atomic.Pointer[Option]
 
-// InitGlobalOption 设置全局 Option，供未显式传入 opt 的调用使用。
-//
-// 注意：本函数是“设置全局配置”而非“可选参数”，因此仍接收单个 *Option。
+func init() {
+	gopt.Store(&Option{})
+}
+
+// SetGlobalOption 设置全局 Option，供 ctx 中未携带 Option 的调用使用。
 //
 // 内部保存的是 opt.Copy() 的副本，之后修改传入的 opt 不会影响全局配置。
 // 传入 nil 会重置为空 Option，此时后续调用会因为缺少 DBProvider 而失败。
-func InitGlobalOption(opt *Option) error {
+func SetGlobalOption(opt *Option) {
 	if opt == nil {
 		gopt.Store(&Option{})
 	} else {
 		gopt.Store(opt.Copy())
 	}
-	return nil
 }
 
 func convertValueByDBType(v any, tag string) any {
+	if types.IsNil(v) {
+		return v
+	}
 	switch tag {
 	case "timestamp":
 		if t, ok := Any2Time(v); ok {
@@ -88,7 +95,7 @@ type Option struct {
 	primaryKey    string
 	tagName       string
 	fromMaster    bool
-	tx            *Tx
+	tx            *txWrapper
 	cacheProvider CacheProvider
 	cacheTTL      time.Duration
 	dbProvider    DBProvider
@@ -101,9 +108,8 @@ type optionCtxKey struct{}
 //
 // 返回值始终是副本，可以安全修改。ctx 为 nil 时也不会 panic。
 //
-// 本包所有查询/构建函数都以 opt ...*Option 的形式接收配置：不传或传 nil 时等价于
-// 调用 Opt(ctx)（没有 ctx 参数的函数则以 Opt(nil) 为准），传入非 nil 的 Option 时
-// 直接使用该值，不再读取 ctx。
+// 本包所有查询/构建函数都只接收 context.Context 作为配置来源，函数内部调用
+// Opt(ctx) 获取 Option；需要自定义 Option 时请用 Option.With(ctx) 传入。
 //
 // 坑：读取全局配置时得到的是浅拷贝，CacheProvider/DBProvider 这类接口值仍指向
 // 同一个实现；如果实现本身有状态，并发使用需要自行保证安全。
@@ -115,20 +121,6 @@ func Opt(ctx context.Context) *Option {
 		}
 	}
 	return gopt.Load().Copy()
-}
-
-// optionFrom 解析可选参数 opt：取第一个非 nil 的值；未传入或全部为 nil 时回退到
-// Opt(ctx)。ctx 为 nil 时等价于使用全局 Option。
-func optionFrom(ctx context.Context, opts []*Option) *Option {
-	for _, opt := range opts {
-		if opt != nil {
-			return opt
-		}
-	}
-	if ctx == nil {
-		return gopt.Load().Copy()
-	}
-	return Opt(ctx)
 }
 
 // Copy 返回 Option 的副本，fields 和 sorts 切片会被复制。
@@ -170,7 +162,7 @@ func (opt *Option) Table(value any) *Option {
 // 仅在 GetWhere/SelectWhere 等读接口中生效；传入空切片表示不指定，由结构体 tag
 // 自动推导列名。
 func (opt *Option) Fields(value ...string) *Option {
-	opt.fields = value
+	opt.fields = append([]string{}, value...)
 	return opt
 }
 
@@ -178,7 +170,7 @@ func (opt *Option) Fields(value ...string) *Option {
 //
 // 仅在 SelectWhere 中生效，列名不做校验，请勿传入未受信任的字符串。
 func (opt *Option) Sorts(value ...string) *Option {
-	opt.sorts = value
+	opt.sorts = append([]string{}, value...)
 	return opt
 }
 
@@ -217,19 +209,23 @@ func (opt *Option) TablePrefix(value string) *Option {
 	return opt
 }
 
-// Tx 设置本次操作使用的事务。
+// WithTx 设置本次操作使用的事务。
 //
 // 设置后读接口会禁用缓存，并优先使用事务连接执行，保证读写在同一事务中。
 //
-// 坑：事务对象必须来自 RunTxContext/RunTxWithOptionContext 等入口，手动构造或跨
+// 坑：事务对象必须来自 RunTx/RunTxWithOption 等入口，手动构造或跨
 // 事务复用可能导致未定义行为。
-func (opt *Option) Tx(tx *Tx) *Option {
-	opt.tx = tx
+func (opt *Option) WithTx(tx *sql.Tx) *Option {
+	if tx == nil {
+		opt.tx = nil
+	} else {
+		opt.tx = &txWrapper{Tx: tx}
+	}
 	return opt
 }
 
-// GetTx 返回已设置的事务，nil 表示当前不在事务中。
-func (opt *Option) GetTx() *Tx {
+// Tx 返回已设置的事务，nil 表示当前不在事务中。
+func (opt *Option) Tx() *txWrapper {
 	if opt == nil {
 		return nil
 	}
@@ -264,18 +260,30 @@ func (opt *Option) CacheProvider(provider CacheProvider) *Option {
 //
 // 这是必填项，未设置时 Exec/Select/Get 以及事务都会返回错误。
 func (opt *Option) DBProvider(provider DBProvider) *Option {
+	if provider == nil {
+		return opt
+	}
 	opt.dbProvider = provider
 	return opt
 }
 
-func (opt *Option) db(isMaster bool) (*DB, error) {
+func (opt *Option) CacheTTL(ttl time.Duration) *Option {
+	opt.cacheTTL = ttl
+	return opt
+}
+
+func (opt *Option) db(isMaster bool) (*dbWrapper, error) {
 	if opt == nil || opt.dbProvider == nil {
 		return nil, fmt.Errorf("orm: DBProvider is required")
 	}
-	return NewDB(opt.dbProvider(isMaster)), nil
+	db := opt.dbProvider(isMaster)
+	if db == nil {
+		return nil, fmt.Errorf("orm: DBProvider supported nil value")
+	}
+	return &dbWrapper{DB: db}, nil
 }
 
-// With 将 Option 放入 context，后续 opt == nil 的调用会自动读取它。
+// With 将 Option 放入 context，本包的查询/构建函数会通过 Opt(ctx) 读取它。
 //
 // 如果 Option 会被多个 goroutine 共享，必须先 Copy 再 With，否则存在数据竞争：
 //

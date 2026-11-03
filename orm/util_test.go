@@ -40,6 +40,7 @@ func TestDereferencedType(t *testing.T) {
 	tp := dereferencedType(reflect.TypeOf(v))
 	t.Log(tp)
 
-	c := &Cond{}
-	t.Log(c.E("id", v), c.args)
+	c := &condition{}
+	c.E("id", v)
+	t.Log(c.exprs, c.args)
 }

@@ -31,7 +31,7 @@ func (*User) Table() string { return "users" }
 ```go
 var master, slave *sql.DB
 
-err := orm.InitGlobalOption(
+orm.SetGlobalOption(
 	(&orm.Option{}).
 		DBProvider(func(isMaster bool) *sql.DB {
 			if isMaster {
@@ -42,15 +42,15 @@ err := orm.InitGlobalOption(
 )
 ```
 
-也可以不设置全局配置，而是在每次调用时显式传入 `opt`：
+也可以不设置全局配置，而是把自定义 Option 放入 context：
 
 ```go
-opt := orm.Opt(ctx).DBProvider(provider)
+ctx = orm.Opt(ctx).DBProvider(provider).With(ctx)
 ```
 
-> 所有函数的 `opt` 参数都是可选的（`opt ...*Option`）。不传或传 `nil` 时会从
-> `ctx` 读取（见 `Option.With`），读不到则使用全局配置；传入非 nil 的 Option 时
-> 直接使用它，不再读取 `ctx`。
+> 所有查询/构建函数只接收 `context.Context` 作为配置来源，内部通过 `Opt(ctx)` 读取
+> Option。需要自定义 Option 时，用 `Option.With(ctx)` 把它放进 context；读不到时
+> 使用全局配置。
 
 ### 3. 增删改查
 
@@ -68,10 +68,8 @@ err = orm.GetWhere(ctx, &u, orm.KVs{{Key: "name", Value: "tom"}})
 
 // 条件查询列表 + 排序 + 分页
 var list []User
-err = orm.SelectWhere(ctx, &list,
-	orm.KVs{{Key: "status", Value: 1}},
-	orm.Opt(ctx).Sorts("-id").Page(1, 20),
-)
+ctx = orm.Opt(ctx).Sorts("-id").Page(1, 20).With(ctx)
+err = orm.SelectWhere(ctx, &list, orm.KVs{{Key: "status", Value: 1}})
 
 // 按主键更新非零字段
 err = orm.PatchByID(ctx, int64(1), &User{Name: "jerry"})
@@ -80,16 +78,15 @@ err = orm.PatchByID(ctx, int64(1), &User{Name: "jerry"})
 n, err := orm.PatchWhere(ctx, &User{Status: 2}, orm.KVs{{Key: "age", Value: 18}})
 
 // 按主键删除（必须显式指定表名）
-err = orm.DeleteByID(ctx, int64(1), orm.Opt(ctx).Table("users"))
+ctx = orm.Opt(ctx).Table("users").With(ctx)
+err = orm.DeleteByID(ctx, int64(1))
 
 // 条件删除（KVs 无法推导表名，必须显式指定表）
-err = orm.DeleteWhere(ctx, orm.KVs{{Key: "status", Value: 0}},
-	orm.Opt(ctx).Table("users"))
+err = orm.DeleteWhere(ctx, orm.KVs{{Key: "status", Value: 0}})
 
 // 统计与存在性判断
 total, err := orm.Count(ctx, &User{})
-ok, err := orm.Exist(ctx, orm.KVs{{Key: "name", Value: "tom"}},
-	orm.Opt(ctx).Table("users"))
+ok, err := orm.Exist(ctx, orm.KVs{{Key: "name", Value: "tom"}})
 ```
 
 批量插入：
@@ -150,13 +147,13 @@ int64(1)          // id = 1
 
 > **坑**：`KVs`、`map`、单值无法正确推导表名（`KVs` 会被推导成 `"kv"`，`map`/单值通常
 > 直接报错）。`DeleteWhere`/`Count`/`CountBy`/`Distinct`/`Exist` 使用这些 filter 时，必须
-> 用 `opt.Table("users")` 显式指定表名。`GetWhere`/`SelectWhere`/`PatchWhere` 从目标结构体
-> 或 data 推导表名，一般不受影响。
+> 用 `orm.Opt(ctx).Table("users").With(ctx)` 显式指定表名。`GetWhere`/`SelectWhere`/
+> `PatchWhere` 从目标结构体或 data 推导表名，一般不受影响。
 
 ## 事务
 
 ```go
-err := orm.RunTxContext(ctx, func(ctx context.Context) error {
+err := orm.RunTx(ctx, func(ctx context.Context) error {
 	if _, err := orm.InsertOne(ctx, &User{Name: "tom"}); err != nil {
 		return err
 	}
@@ -167,7 +164,7 @@ err := orm.RunTxContext(ctx, func(ctx context.Context) error {
 
 - 事务固定使用主库；`f` 返回错误或 panic 时自动回滚。
 - `f` 内部必须使用传入的 `ctx`，否则可能换到事务外的连接。
-- 在事务中再次调用 `RunTxContext` 会复用当前事务，不会开启嵌套事务或保存点。
+- 在事务中再次调用 `RunTx` 会复用当前事务，不会开启嵌套事务或保存点。
 
 ## 表锁
 
@@ -270,17 +267,20 @@ orm.IsDuplicate(err) // MySQL Error 1062 Duplicate entry
 ## 常见坑速查
 
 1. `DBProvider` 未设置时，所有 SQL 执行都会返回 `orm: DBProvider is required`。
-2. `Option{}` 不要在外部直接构造；用 `orm.Opt(ctx)` 获取继承全局配置的副本。
+2. `Option{}` 不要在外部直接构造；用 `orm.Opt(ctx)` 获取继承全局配置的副本，再用
+   `Option.With(ctx)` 传入。
 3. `Option` 的链式方法会原地修改对象；跨 goroutine 复用前先 `Copy()`。
 4. 结构体过滤跳过零值字段，过滤 `0`/`""` 请用 `KVs`。
 5. 更新只会写入非零字段，无法把列更新为 `0`/`""`/`nil`；`incr`/`decr` 也要求字段本身是
    非零占位值（通常填 `1`），否则该字段会被跳过。
 6. 插入字段必须声明 `db:",insert"`，否则不会被写入；完全没有 insert 字段会报错。
 7. 完全为零值的结构体行在批量插入时会被跳过。
-8. `DeleteByID` 没有结构体参数，必须通过 `opt.Table(...)` 指定表名。
+8. `DeleteByID` 没有结构体参数，必须通过 `Option.With(ctx)` 传入带 `Table(...)` 的 Option
+   来指定表名。
 9. `DeleteWhere`/`PatchWhere` 的 `filter` 必须能生成条件，否则返回错误。
 10. `KVs`/`map`/单值 filter 无法正确推导表名（`KVs` 会得到 `"kv"`），`DeleteWhere`/
-    `Count`/`CountBy`/`Distinct`/`Exist` 需显式 `opt.Table(...)`。
+    `Count`/`CountBy`/`Distinct`/`Exist` 需用 `Option.With(ctx)` 显式传入
+    `Table(...)`。
 11. 空切片作为过滤条件会生成 `0 = 1`，不会报错但也不会命中任何行。
 12. `SelectBuilder.Offset` 只有在 `Limit > 0` 时才生效。
 13. `orm.In` 遇到空切片会替换为 `NULL`，`IN (NULL)` 与 `NOT IN (NULL)` 都匹配不到数据。

@@ -10,30 +10,26 @@ import (
 // InsertIgnore 批量插入数据，使用 INSERT IGNORE，主键或唯一键冲突的行会被忽略。
 //
 // 表名和列名由 data[0] 决定，因此所有元素的类型必须一致。单条 SQL 执行，本身不开事务；
-// 需要事务请配合 RunTxContext 使用。
+// 需要事务请配合 RunTx 使用。
 //
 // 坑：data 为空时直接返回 nil（不会报错）；字段必须声明 `db:",insert"` 才会被写入，
 // 否则返回错误；完全为零值的结构体行会被静默跳过。
-func InsertIgnore(ctx context.Context, data []any, opts ...*Option) error {
+func InsertIgnore[T ~struct{}](ctx context.Context, data []T) error {
 	if len(data) == 0 {
 		return nil
 	}
-	opt := optionFrom(ctx, opts)
-	var (
-		err error
-	)
-	table, err := TableName(data[0], opt)
+	table, err := TableName(ctx, data[0])
 	if err != nil {
 		return err
 	}
-	ib, err := NewInsertBuilderFromStruct(ctx, data, opt)
+	ib, err := NewInsertBuilderFromStruct(ctx, data)
 	if err != nil {
 		return fmt.Errorf("create insert builder from structure error: %w", err)
 	}
 	ib = ib.InsertIgnoreInto(table)
-	sql, args := Build(ctx, ib)
+	sql, args := ib.Build()
 
-	_, err = Exec(opt.With(ctx), sql, args...)
+	_, err = Exec(ctx, sql, args...)
 	if err != nil {
 		return fmt.Errorf("exec error: %w", err)
 	}
@@ -43,25 +39,24 @@ func InsertIgnore(ctx context.Context, data []any, opts ...*Option) error {
 // InsertMany 批量插入数据，生成一条多行 INSERT 语句。
 //
 // 所有元素的类型必须一致（表名和列名只从 data[0] 推导）。单条 SQL 执行，本身不开事务；
-// 需要事务请配合 RunTxContext 使用。
+// 需要事务请配合 RunTx 使用。
 //
 // 坑：data 为空时直接返回 nil；字段必须声明 `db:",insert"`；完全为零值的结构体行会被
 // 静默跳过；不同结构体类型的元素混用可能触发下标越界 panic。
-func InsertMany(ctx context.Context, data []any, opts ...*Option) error {
+func InsertMany[T ~struct{}](ctx context.Context, data []T) error {
 	if len(data) == 0 {
 		return nil
 	}
-	opt := optionFrom(ctx, opts)
 	var (
 		err error
 	)
-	ib, err := NewInsertBuilderFromStruct(ctx, data, opt)
+	ib, err := NewInsertBuilderFromStruct(ctx, data)
 	if err != nil {
 		return fmt.Errorf("create insert builder from structure error: %w", err)
 	}
-	sql, args := Build(ctx, ib)
+	sql, args := ib.Build()
 
-	_, err = Exec(opt.With(ctx), sql, args...)
+	_, err = Exec(ctx, sql, args...)
 	if err != nil {
 		return fmt.Errorf("exec error: %w", err)
 	}
@@ -74,34 +69,37 @@ func InsertMany(ctx context.Context, data []any, opts ...*Option) error {
 //
 // 坑：REPLACE 遇到唯一键冲突时会先删除旧行再插入新行，会触发删除触发器、级联外键，
 // 并把未指定的列重置为默认值；通常应优先使用 INSERT ... ON DUPLICATE KEY UPDATE。
-func Replace(ctx context.Context, data any, opts ...*Option) (int64, error) {
+func Replace(ctx context.Context, data any) (int64, error) {
 	if data == nil {
 		return 0, nil
 	}
-	opt := optionFrom(ctx, opts)
+	opt := Opt(ctx)
 	var (
 		err error
 		id  int64
 		r   driver.Result
 	)
-	table, err := TableName(data, opt)
+	table, err := TableName(ctx, data)
 	if err != nil {
 		return 0, err
 	}
-	ib, err := NewInsertBuilderFromStruct(ctx, []any{data}, opt)
+	ib, err := NewInsertBuilderFromStruct(ctx, []any{data})
 	if err != nil {
 		return 0, fmt.Errorf("create insert builder from structure error: %w", err)
 	}
 	ib = ib.ReplaceInto(table)
-	sql, args := Build(ctx, ib)
+	sql, args := ib.Build()
 
-	r, err = Exec(opt.With(ctx), sql, args...)
+	r, err = Exec(ctx, sql, args...)
 	if err != nil {
 		return 0, fmt.Errorf("exec error: %w", err)
 	}
 	id, err = r.LastInsertId()
 	if err != nil {
 		return 0, fmt.Errorf("get last insert id: %w", err)
+	}
+	if opt.cacheProvider != nil {
+		opt.cacheProvider.RemoveAll(table)
 	}
 	return id, nil
 }
@@ -113,23 +111,22 @@ func Replace(ctx context.Context, data any, opts ...*Option) (int64, error) {
 //
 // 坑：data 为 nil 时返回 (0, nil)，不会报错；零值字段会被正常写入（零值），但完全为
 // 零值的结构体会被 NewInsertBuilderFromStruct 判定为无数据并返回错误。
-func InsertOne(ctx context.Context, data any, opts ...*Option) (int64, error) {
+func InsertOne(ctx context.Context, data any) (int64, error) {
 	if data == nil {
 		return 0, nil
 	}
-	opt := optionFrom(ctx, opts)
 	var (
 		err error
 		id  int64
 		r   driver.Result
 	)
-	ib, err := NewInsertBuilderFromStruct(ctx, []any{data}, opt)
+	ib, err := NewInsertBuilderFromStruct(ctx, []any{data})
 	if err != nil {
 		return 0, fmt.Errorf("create insert builder from structure error: %w", err)
 	}
-	sql, args := Build(ctx, ib)
+	sql, args := ib.Build()
 
-	r, err = Exec(opt.With(ctx), sql, args...)
+	r, err = Exec(ctx, sql, args...)
 	if err != nil {
 		return 0, fmt.Errorf("exec error: %w", err)
 	}
@@ -145,21 +142,17 @@ func InsertOne(ctx context.Context, data any, opts ...*Option) (int64, error) {
 // 只有 tag 中带 insert 选项的字段会被写入，例如 `db:"columnName,insert"` 或 `db:",insert"`；
 // 没有任何 insert 字段时返回错误。
 //
-// 表名和列名只从 data[0] 解析，因此所有元素必须是相同的结构体类型。
+// 表名和列名只从 data[0] 解析，因此所有元素必须是相同的结构体类型，否则会被忽略。
 //
 // 注意：
-//   - 完全为零值（v.IsZero()）的结构体行会被跳过；如果所有行都被跳过则返回
-//     "no values to insert"；
+//   - data 中完全为零值（v.IsZero()）的数据会被跳过，不会写入；
+//   - 如果所有行都被跳过则返回 "no values to insert"；
 //   - 单个字段为零值时仍会正常写入零值，不会跳过；
-func NewInsertBuilderFromStruct(ctx context.Context, data []any, opts ...*Option) (*InsertBuilder, error) {
+func NewInsertBuilderFromStruct[T ~struct{}](ctx context.Context, data []T) (*InsertBuilder, error) {
 	if len(data) <= 0 {
 		return nil, fmt.Errorf("no data to insert")
 	}
-	if data[0] == nil {
-		return nil, fmt.Errorf("data[0] is nil")
-	}
-	opt := optionFrom(ctx, opts)
-	table, err := TableName(data[0], opt)
+	table, err := TableName(ctx, data[0])
 	if err != nil {
 		return nil, err
 	}
@@ -175,7 +168,7 @@ func NewInsertBuilderFromStruct(ctx context.Context, data []any, opts ...*Option
 		return nil, fmt.Errorf("data type must be struct")
 	}
 
-	for _, f := range structFields(t, getTagName(opt)) {
+	for _, f := range structFields(t, getTagName(Opt(ctx))) {
 		if _, ok := f.Opts["insert"]; ok {
 			insertFields = append(insertFields, f)
 			cols = append(cols, f.Name)
@@ -197,15 +190,18 @@ func NewInsertBuilderFromStruct(ctx context.Context, data []any, opts ...*Option
 		if !v.IsValid() || v.IsZero() {
 			continue
 		}
+		if v.Type() != t {
+			continue
+		}
 
 		vals := make([]any, 0, len(cols))
 		for _, f := range insertFields {
 			fv := fieldValueByIndex(v, f.Index)
-			if !fv.IsValid() || fv.IsNil() {
+			if !fv.IsValid() {
 				vals = append(vals, nil)
 				continue
 			}
-			vals = append(vals, fieldValueAny(fv))
+			vals = append(vals, convertValueByDBType(fieldValueAny(fv), f.Opts["type"]))
 		}
 
 		ib.Values(vals...)

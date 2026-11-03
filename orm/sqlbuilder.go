@@ -7,25 +7,26 @@ import (
 	"github.com/cloudfly/go/types"
 )
 
-// Cond 收集 WHERE 表达式用到的参数，并由各 Builder 内嵌使用。
+// condition 收集 WHERE 表达式用到的参数，并由各 Builder 内嵌使用。
 //
-// Cond 的方法（E/NE/In/...）只返回表达式字符串，同时把参数收集到内部。调用方必须把
+// condition 的方法（E/NE/In/...）只返回表达式字符串，同时把参数收集到内部。调用方必须把
 // 返回的表达式传给对应 Builder 的 Where 方法，SQL 与参数才会真正生成：
 //
-//	cond := &b.Cond
+//	cond := &b.condition
 //	expr := cond.E("id", 1)
 //	b = b.Where(expr)
 //	sql, args := b.Build() // args 中包含 1
 //
-// 坑：Cond 的 args 只增不减，Builder.Where 也是追加语义；重复调用 Build 或复用同一个
+// 坑：condition 的 args 只增不减，Builder.Where 也是追加语义；重复调用 Build 或复用同一个
 // Builder 会得到累积的条件和参数。
-type Cond struct {
-	args []any
+type condition struct {
+	exprs []string
+	args  []any
 }
 
-func (c *Cond) add(expr string, args ...any) string {
+func (c *condition) add(expr string, args ...any) {
 	c.args = append(c.args, args...)
-	return expr
+	c.exprs = append(c.exprs, expr)
 }
 
 // E 生成 "column = ?" 条件；value 为 nil 时生成 "column IS NULL"。
@@ -34,87 +35,95 @@ func (c *Cond) add(expr string, args ...any) string {
 // 严禁把用户输入转成 Raw。
 //
 // 生成的表达式需要再传给 Builder.Where 才会生效。
-func (c *Cond) E(column string, value any) string {
+func (c *condition) E(column string, value any) {
 	if types.IsNil(value) {
-		return c.add(column + " IS NULL")
+		c.add(column + " IS NULL")
+		return
 	}
 
 	if s, ok := value.(Raw); ok {
-		return c.add(string(s))
+		c.add(column + " = " + string(s))
+		return
 	}
 
-	return c.add(column+" = ?", value)
+	c.add(column+" = ?", value)
 }
 
 // NE 生成 "column <> ?" 条件；value 为字面 nil 时生成 "column IS NOT NULL"。
 //
 // 注意：类型化的 nil 指针（如 (*int)(nil)）不会命中 nil 分支，会被当作参数传入，
 // 结果通常不符合预期。
-func (c *Cond) NE(column string, value any) string {
-	if value == nil {
-		return c.add(column + " IS NOT NULL")
+func (c *condition) NE(column string, value any) {
+	if types.IsNil(value) {
+		c.add(column + " IS NOT NULL")
+		return
 	}
-	return c.add(column+" <> ?", value)
+
+	if s, ok := value.(Raw); ok {
+		c.add(column + " <> " + string(s))
+		return
+	}
+
+	c.add(column+" <> ?", value)
 }
 
 // GreaterThan 生成 "column > ?" 条件。
 //
 // 注意：value 为 nil 时生成的是 "column > NULL"，永远不成立。
-func (c *Cond) GreaterThan(column string, value any) string {
-	return c.add(column+" > ?", value)
+func (c *condition) GreaterThan(column string, value any) {
+	c.add(column+" > ?", value)
 }
 
 // GreaterEqualThan 生成 "column >= ?" 条件。
-func (c *Cond) GreaterEqualThan(column string, value any) string {
-	return c.add(column+" >= ?", value)
+func (c *condition) GreaterEqualThan(column string, value any) {
+	c.add(column+" >= ?", value)
 }
 
 // LessThan 生成 "column < ?" 条件。
-func (c *Cond) LessThan(column string, value any) string {
-	return c.add(column+" < ?", value)
+func (c *condition) LessThan(column string, value any) {
+	c.add(column+" < ?", value)
 }
 
 // LessEqualThan 生成 "column <= ?" 条件。
-func (c *Cond) LessEqualThan(column string, value any) string {
-	return c.add(column+" <= ?", value)
+func (c *condition) LessEqualThan(column string, value any) {
+	c.add(column+" <= ?", value)
 }
 
 // In 生成 "column IN (?, ?, ...)" 条件。
 //
-// values 为空时生成永假条件 "0 = 1"，用于安全地表达“空集合”。参数按传入顺序展开，
-// 不会做类型转换。
-func (c *Cond) In(column string, values ...any) string {
+// values 为空时不生效
+func (c *condition) In(column string, values ...any) {
 	if len(values) == 0 {
-		return c.add("0 = 1")
+		return
 	}
-	return c.add(column+" IN ("+placeholders(len(values))+")", values...)
+	c.add(column+" IN ("+placeholders(len(values))+")", values...)
 }
 
 // NotIn 生成 "column NOT IN (?, ?, ...)" 条件。
 //
-// values 为空时生成永真条件 "1 = 1"。
-func (c *Cond) NotIn(column string, values ...any) string {
+// values 为空时不生效
+func (c *condition) NotIn(column string, values ...any) {
 	if len(values) == 0 {
-		return c.add("1 = 1")
+		return
 	}
-	return c.add(column+" NOT IN ("+placeholders(len(values))+")", values...)
+	c.add(column+" NOT IN ("+placeholders(len(values))+")", values...)
 }
 
 // IsNull 生成 "column IS NULL" 条件。
-func (c *Cond) IsNull(column string) string {
-	return c.add(column + " IS NULL")
+func (c *condition) IsNull(column string) {
+	c.add(column + " IS NULL")
 }
 
 // Like 生成 "column LIKE ?" 条件。
 //
 // value 必须自带通配符（如 "%abc%"）；方法不会转义 % 和 _，也不会自动添加 %。
-func (c *Cond) Like(column string, value any) string {
-	return c.add(column+" LIKE ?", value)
+func (c *condition) Like(column string, value any) {
+	c.add(column+" LIKE ?", value)
 }
 
 // NotLike 生成 "column NOT LIKE ?" 条件，通配符规则同 Like。
-func (c *Cond) NotLike(column string, value any) string {
-	return c.add(column+" NOT LIKE ?", value)
+func (c *condition) NotLike(column string, value any) {
+	c.add(column+" NOT LIKE ?", value)
 }
 
 func placeholders(n int) string {
@@ -139,7 +148,7 @@ type Raw string
 //
 // 链式方法都会原地修改并返回自身。Where 是追加语义，Select/GroupBy/OrderBy 是覆盖语义。
 type SelectBuilder struct {
-	Cond
+	condition
 	table   string
 	cols    []string
 	where   []string
@@ -176,13 +185,24 @@ func (b *SelectBuilder) Where(exprs ...string) *SelectBuilder {
 
 // GroupBy 设置 GROUP BY 列，会覆盖之前的设置。
 func (b *SelectBuilder) GroupBy(cols ...string) *SelectBuilder {
-	b.groupBy = append([]string{}, cols...)
+	for _, col := range cols {
+		b.groupBy = append([]string{}, Escape(col))
+	}
 	return b
 }
 
 // OrderBy 设置 ORDER BY 子句，会覆盖之前的设置；列名和方向都原样拼接。
 func (b *SelectBuilder) OrderBy(cols ...string) *SelectBuilder {
-	b.orderBy = append([]string{}, cols...)
+	for _, col := range cols {
+		if col == "" || col == "-" {
+			continue
+		}
+		if col[0] == '-' {
+			b.orderBy = append([]string{}, Escape(strings.TrimLeft(col, "-"))+" DESC")
+		} else {
+			b.orderBy = append([]string{}, Escape(col))
+		}
+	}
 	return b
 }
 
@@ -222,7 +242,7 @@ func (b *SelectBuilder) Build() (string, []any) {
 			statement += fmt.Sprintf(" OFFSET %d", b.offset)
 		}
 	}
-	return statement, b.Cond.args
+	return statement, b.condition.args
 }
 
 // InsertBuilder 构建 INSERT/INSERT IGNORE/REPLACE 语句。
@@ -318,7 +338,7 @@ func (b *InsertBuilder) Build() (string, []any) {
 // SET 子句通过 SetMore 添加；Assign/Incr/Decr/Add/Sub/Mul/Div 会返回可传给 SetMore 的
 // 表达式字符串。
 type UpdateBuilder struct {
-	Cond
+	condition
 	table   string
 	sets    []string
 	setArgs []any
@@ -403,13 +423,13 @@ func (b *UpdateBuilder) Build() (string, []any) {
 	if len(b.where) > 0 {
 		statement += " WHERE " + strings.Join(b.where, " AND ")
 	}
-	args := append(append([]any{}, b.setArgs...), b.Cond.args...)
+	args := append(append([]any{}, b.setArgs...), b.condition.args...)
 	return statement, args
 }
 
 // DeleteBuilder 构建 DELETE 语句。
 type DeleteBuilder struct {
-	Cond
+	condition
 	table string
 	where []string
 }
@@ -440,5 +460,5 @@ func (b *DeleteBuilder) Build() (string, []any) {
 	if len(b.where) > 0 {
 		statement += " WHERE " + strings.Join(b.where, " AND ")
 	}
-	return statement, append([]any{}, b.Cond.args...)
+	return statement, append([]any{}, b.condition.args...)
 }

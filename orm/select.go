@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
-	"strings"
 	"time"
 )
 
@@ -18,7 +17,7 @@ const (
 
 // GetByID 根据主键（默认 "id"，可通过 Option.PrimaryKey 修改）查询一行并扫描到 dst。
 //
-// 表名由 dst 的类型、Table() 方法或 opt.Table() 决定。当不在事务中且未指定
+// 表名由 dst 的类型、Table() 方法或 ctx 中 Option 的 Table() 决定。当不在事务中且未指定
 // FromMaster 时，会先读缓存；缓存命中且 JSON 反序列化成功则直接返回，否则查库并在
 // 成功后写回缓存。缓存 TTL 见 DefaultCacheTTL。
 //
@@ -27,15 +26,14 @@ const (
 //   - 缓存反序列化失败会静默回退到数据库，不会报错；
 //   - 在事务中（opt.Tx）会跳过缓存读写，避免回滚后缓存出现脏数据；
 //   - 查询失败不会删除缓存，之后可能继续读到旧值；
-//   - id 的语义由 WhereFrom 决定：单值/切片是主键条件，结构体/KVs 则按字段生成条件。
-func GetByID[ID comparable](ctx context.Context, dst any, id ID, opts ...*Option) error {
-	opt := optionFrom(ctx, opts)
+func GetByID[ID comparable](ctx context.Context, dst any, id ID) error {
+	opt := Opt(ctx)
 
-	table, err := TableName(dst, opt)
+	table, err := TableName(ctx, dst)
 	if err != nil {
 		return err
 	}
-	if opt.tx == nil && !opt.fromMaster && opt.cacheProvider != nil {
+	if opt.tx == nil && !opt.fromMaster && opt.cacheProvider != nil && connFromContext(ctx) == nil {
 		// Not reading data from the primary database indicates that some delay is tolerable.
 		// Attempt to read from the cache provider.
 		if content, ok := opt.cacheProvider.Get(table, id); ok && len(content) > 0 {
@@ -45,27 +43,30 @@ func GetByID[ID comparable](ctx context.Context, dst any, id ID, opts ...*Option
 		}
 	}
 
-	b, err := NewSelectBuilderFromStruct(dst, opt)
+	b, err := NewSelectBuilderFromStruct(ctx, dst)
 	if err != nil {
 		return fmt.Errorf("create select builder error:%w", err)
 	}
-	conds := WhereFrom(&b.Cond, id, nil, opt)
-	if len(conds) == 0 {
+	if fields := opt.fields; len(fields) > 0 {
+		b = b.Select(fields...)
+	}
+	WhereFrom(ctx, &b.condition, KV{getPrimaryKey(opt), id, "eq"})
+	if len(b.condition.exprs) == 0 {
 		return fmt.Errorf("at least one filter condition in Select SQL")
 	}
-	b = b.Where(conds...)
+	b = b.Where(b.condition.exprs...).Limit(1)
 
 	var (
 		statement string
 		args      []any
 	)
-	statement, args = Build(ctx, b)
+	statement, args = b.Build()
 
-	if err := Get(opt.With(ctx), dst, statement, args...); err != nil {
+	if err := Get(ctx, dst, statement, args...); err != nil {
 		return err
 	}
 
-	if opt.tx == nil && opt.cacheProvider != nil {
+	if opt.cacheProvider != nil {
 		content, err := json.Marshal(dst)
 		if err != nil {
 			slog.WarnContext(ctx, "Failed to marshal data for cacheing", "error", err, "query", statement, "args", args)
@@ -83,20 +84,25 @@ func GetByID[ID comparable](ctx context.Context, dst any, id ID, opts ...*Option
 // 可用 IsNotFound 判断。
 //
 // 注意：本函数只取一行，不处理 Option.Sorts 和 Option.Page；需要排序/分页的列表查询
-// 请使用 SelectWhere。表名默认从 dst 推导，filter 不是结构体时可用 opt.Table 指定。
-func GetWhere(ctx context.Context, dst any, filter any, opts ...*Option) error {
-	opt := optionFrom(ctx, opts)
-	builder, err := NewSelectBuilderFromStruct(dst, opt)
+// 请使用 SelectWhere。表名默认从 dst 推导，filter 不是结构体时可用
+// Option.With(ctx) 传入 Table(...) 指定。
+func GetWhere(ctx context.Context, dst any, filter any) error {
+	opt := Opt(ctx)
+	builder, err := NewSelectBuilderFromStruct(ctx, dst)
 	if err != nil {
 		return fmt.Errorf("new select builder error: %w", err)
 	}
 	if len(opt.fields) > 0 {
 		builder = builder.Select(opt.fields...)
 	}
-	builder = builder.Where(WhereFrom(&builder.Cond, filter, nil, opt)...)
-	sql, args := Build(ctx, builder)
+	WhereFrom(ctx, &builder.condition, filter)
+	builder = builder.Where(builder.condition.exprs...).Limit(1)
+	if len(opt.sorts) > 0 {
+		builder = builder.OrderBy(opt.sorts...)
+	}
+	sql, args := builder.Build()
 
-	return Get(opt.With(ctx), dst, sql, args...)
+	return Get(ctx, dst, sql, args...)
 }
 
 // SelectWhere 根据自定义条件查询多行数据并扫描到 dst。
@@ -107,60 +113,53 @@ func GetWhere(ctx context.Context, dst any, filter any, opts ...*Option) error {
 // 坑：
 //   - 查询不到的“数据”不会报错，dst 为空切片；只有 SQL/扫描失败才返回错误；
 //   - Sorts 中的列名原样拼接，不做校验，请勿传入未受信任的字符串；
-//   - 表名默认从 dst 推导，filter 不是结构体时可用 opt.Table 指定。
-func SelectWhere(ctx context.Context, dst any, filter any, opts ...*Option) error {
-	opt := optionFrom(ctx, opts)
-	builder, err := NewSelectBuilderFromStruct(dst, opt)
+//   - 表名默认从 dst 推导，filter 不是结构体时可用 Option.With(ctx) 传入
+//     Table(...) 指定。
+func SelectWhere(ctx context.Context, dst any, filter any) error {
+	opt := Opt(ctx)
+	builder, err := NewSelectBuilderFromStruct(ctx, dst)
 	if err != nil {
 		return fmt.Errorf("new select builder error: %w", err)
 	}
 	if len(opt.fields) > 0 {
 		builder = builder.Select(opt.fields...)
 	}
-	builder = builder.Where(WhereFrom(&builder.Cond, filter, nil, opt)...)
+	WhereFrom(ctx, &builder.condition, filter)
+	builder = builder.Where(builder.condition.exprs...)
 
 	if len(opt.sorts) > 0 {
-		orderByCols := make([]string, 0, 8)
-		for _, col := range opt.sorts {
-			if col == "" {
-				continue
-			}
-			if col[0] == '-' {
-				orderByCols = append(orderByCols, strings.TrimLeft(col, "-")+" DESC")
-			} else {
-				orderByCols = append(orderByCols, col)
-			}
-		}
-		builder = builder.OrderBy(orderByCols...)
+		builder = builder.OrderBy(opt.sorts...)
 	}
 	if opt.page > 0 && opt.pageSize > 0 {
 		builder = builder.Limit(opt.pageSize).Offset((opt.page - 1) * opt.pageSize)
 	}
 
-	sql, args := Build(ctx, builder)
+	sql, args := builder.Build()
 
-	return Select(opt.With(ctx), dst, sql, args...)
+	return Select(ctx, dst, sql, args...)
 }
 
 // Count 统计表中满足 filter 的行数。
 //
-// filter 为 nil 或零值结构体时不会生成 WHERE，即统计全表。表名从 filter 推导，
-// 当 filter 是 KVs/map/单值时必须通过 opt.Table 显式指定表名（KVs 会被推导成 "kv"）。
-func Count(ctx context.Context, filter any, opts ...*Option) (int64, error) {
-	opt := optionFrom(ctx, opts)
+// filter 为 nil 或零值结构体时统计全表。
+// 如果 filter 是一个 struct 类型，表名从 filter 推导。否则你需要通过 orm.Opt(ctx).Table("table_name").With(ctx) 通过 Context 传入表名
+//
+// 我们推荐为 filter 定义一个清晰的 struct，而不是使用自由的 map 或 KVs，这对项目的稳定性，可维护性，可读性都有好处。
+func Count(ctx context.Context, filter any) (int64, error) {
 	total := sql.NullInt64{}
-	table, err := TableName(filter, opt)
+	table, err := TableName(ctx, filter)
 	if err != nil {
 		return 0, err
 	}
 	b := NewSelectBuilder().Select("COUNT(1) as total").From(table)
-	b = b.Where(WhereFrom(&b.Cond, filter, nil, opt)...)
+	WhereFrom(ctx, &b.condition, filter)
+	b = b.Where(b.condition.exprs...)
 
-	sql, args := Build(ctx, b)
+	sql, args := b.Build()
 
-	err = Get(opt.With(ctx), &total, sql, args...)
+	err = Get(ctx, &total, sql, args...)
 	if IsNotFound(err) {
-		err = nil
+		return 0, nil
 	}
 	return total.Int64, err
 }
@@ -170,27 +169,30 @@ func Count(ctx context.Context, filter any, opts ...*Option) (int64, error) {
 // dst 必须是指向切片的指针，结果中计数列名为 "_total"（整型），分组列按 group 顺序
 // 返回。group 为空时退化为总量统计。
 //
-// 表名从 filter 推导，filter 是 KVs/单值时需用 opt.Table 指定表名
-func CountBy(ctx context.Context, dst any, filter any, group []string, opts ...*Option) error {
-	opt := optionFrom(ctx, opts)
+// filter 为 nil 或零值结构体时统计全表。
+// 如果 filter 是一个 struct 类型，表名从 filter 推导。否则你需要通过 orm.Opt(ctx).Table("table_name").With(ctx) 通过 Context 传入表名
+//
+// 我们推荐为 filter 定义一个清晰的 struct，而不是使用自由的 map 或 KVs，这对项目的稳定性，可维护性，可读性都有好处。
+func CountBy(ctx context.Context, dst any, filter any, group []string) error {
 	cols := []string{"COUNT(1) as _total"}
 	if len(group) > 0 {
 		cols = append(cols, group...)
 	}
-	table, err := TableName(filter, opt)
+	table, err := TableName(ctx, filter)
 	if err != nil {
 		return err
 	}
 	b := NewSelectBuilder().Select(cols...).From(table)
-	b = b.Where(WhereFrom(&b.Cond, filter, nil, opt)...)
+	WhereFrom(ctx, &b.condition, filter)
+	b = b.Where(b.condition.exprs...)
 
 	if len(group) > 0 {
 		b = b.GroupBy(group...)
 	}
 
-	sql, args := Build(ctx, b)
+	sql, args := b.Build()
 
-	err = Select(opt.With(ctx), dst, sql, args...)
+	err = Select(ctx, dst, sql, args...)
 	if IsNotFound(err) {
 		err = nil
 	}
@@ -203,21 +205,20 @@ func CountBy(ctx context.Context, dst any, filter any, group []string, opts ...*
 // column 会经过 Escape 处理，作为标识符使用。
 //
 // 注意：结果不分页、不排序；filter 为 nil 时统计全表。表名从 filter 推导，
-// filter 是 KVs/单值时需用 opt.Table 指定
-func Distinct(ctx context.Context, column string, filter any, opts ...*Option) ([]any, error) {
-	opt := optionFrom(ctx, opts)
-	table, err := TableName(filter, opt)
+// filter 是 KVs/单值时需通过 Option.With(ctx) 传入 Table(...) 指定
+func Distinct(ctx context.Context, column string, filter any) ([]any, error) {
+	table, err := TableName(ctx, filter)
 	if err != nil {
 		return nil, err
 	}
 	builder := NewSelectBuilder().From(table)
 	builder = builder.Select(fmt.Sprintf("DISTINCT(%s) as %s", Escape(column), Escape(column)))
-	conds := WhereFrom(&builder.Cond, filter, nil, opt)
-	builder = builder.Where(conds...)
-	sql, args := Build(ctx, builder)
+	WhereFrom(ctx, &builder.condition, filter)
+	builder = builder.Where(builder.condition.exprs...)
+	sql, args := builder.Build()
 
 	data := []any{}
-	if err := Select(opt.With(ctx), &data, sql, args...); err != nil {
+	if err := Select(ctx, &data, sql, args...); err != nil {
 		return nil, fmt.Errorf("select error: %w", err)
 	}
 	return data, nil
@@ -228,19 +229,20 @@ func Distinct(ctx context.Context, column string, filter any, opts ...*Option) (
 // 使用 "SELECT 1 ... LIMIT 1" 实现，不返回行内容。filter 为 nil 时等价于判断表中是否
 // 有任何数据。
 //
-// 表名从 filter 推导，filter 是 KVs/单值时需用 opt.Table 指定表名
-func Exist(ctx context.Context, filter any, opts ...*Option) (bool, error) {
-	opt := optionFrom(ctx, opts)
+// 表名从 filter 推导，filter 是 KVs/单值时需通过 Option.With(ctx) 传入 Table(...)
+// 指定表名
+func Exist(ctx context.Context, filter any) (bool, error) {
 	n := sql.NullInt64{}
-	table, err := TableName(filter, opt)
+	table, err := TableName(ctx, filter)
 	if err != nil {
 		return false, err
 	}
 	b := NewSelectBuilder().Select("1").From(table).Limit(1)
-	b = b.Where(WhereFrom(&b.Cond, filter, nil, opt)...)
+	WhereFrom(ctx, &b.condition, filter)
+	b = b.Where(b.condition.exprs...)
 
-	statement, args := Build(ctx, b)
-	err = Get(opt.With(ctx), &n, statement, args...)
+	statement, args := b.Build()
+	err = Get(ctx, &n, statement, args...)
 	if err != nil {
 		if IsNotFound(err) {
 			return false, nil
@@ -260,9 +262,8 @@ func Exist(ctx context.Context, filter any, opts ...*Option) (bool, error) {
 //   - 没有可用列时回退为 "*"。
 //
 // 注意：返回的 Builder 只设置了 FROM 和 SELECT，调用方还需要自行设置 WHERE。
-func NewSelectBuilderFromStruct(data any, opts ...*Option) (*SelectBuilder, error) {
-	opt := optionFrom(nil, opts)
-	table, err := TableName(data, opt)
+func NewSelectBuilderFromStruct(ctx context.Context, data any) (*SelectBuilder, error) {
+	table, err := TableName(ctx, data)
 	if err != nil {
 		return nil, err
 	}
@@ -278,8 +279,8 @@ func NewSelectBuilderFromStruct(data any, opts ...*Option) (*SelectBuilder, erro
 	}
 
 	cols := make([]string, 0, 8)
-	for _, f := range structFields(t, getTagName(opt)) {
-		if optv, ok := f.Opts["select"]; ok && (optv != "-" && optv != "false") {
+	for _, f := range structFields(t, getTagName(Opt(ctx))) {
+		if optv, ok := f.Opts["select"]; ok && (optv == "-" || optv == "false") {
 			// declare select option `select:-` or `select:false` in struct tag, skip it
 			continue
 		}

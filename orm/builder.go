@@ -17,22 +17,7 @@ const (
 	DefaultTagName = "db"
 )
 
-// Builder 是所有 SQL 构建器实现的接口。
-//
-// Build 返回完整 SQL 语句和与 "?" 占位符顺序一致的参数。
-type Builder interface {
-	Build() (string, []any)
-}
-
-// Build 执行 Builder，返回 SQL 语句和参数。
-//
-// 目前它的行为与 b.Build() 完全一致；ctx 预留给将来做命名空间/租户条件注入，
-// 当前传入 nil 也是安全的。
-func Build(ctx context.Context, b Builder) (string, []any) {
-	return b.Build()
-}
-
-// WhereFromStruct 根据结构体中的非零字段生成 WHERE 表达式，并追加到 dst 后返回。
+// whereFromStruct 根据结构体中的非零字段生成 WHERE 表达式，并追加到 dst 后返回。
 //
 // 列名来自 opt 指定的 tag（默认 "db"），条件操作符来自字段的 `op` tag，支持：
 // e/eq/equal、ne/neq、gt、gte、lt、lte、in、notin、like、notlike。
@@ -40,60 +25,44 @@ func Build(ctx context.Context, b Builder) (string, []any) {
 //
 // 注意：
 //   - nil value 字段会被跳过， 如果有需要判断 column IS NULL，请改用 KVs；
-func WhereFromStruct(c *Cond, data any, dst []string, opts ...*Option) []string {
-	opt := optionFrom(context.Background(), opts)
+func whereFromStruct(ctx context.Context, c *condition, data any) {
+	opt := Opt(ctx)
 	if data == nil {
-		return dst
+		return
 	}
 	v := dereferencedValue(reflect.ValueOf(data))
 	if !v.IsValid() || v.IsZero() {
-		return dst
+		return
 	}
 	t := v.Type()
 	if t.Kind() != reflect.Struct {
-		return dst
+		return
 	}
 
 	for _, f := range structFields(t, getTagName(opt)) {
 		fv := fieldValueByIndex(v, f.Index)
-		if !fv.IsValid() || fv.IsNil() {
+		if !fv.IsValid() || fv.IsZero() {
 			continue
 		}
-		fieldValue := convertValueByDBType(fieldValueAny(fv), f.Opts["type"])
-		dst = appendWhereExpr(c, dst, f.Name, fieldValue, f.Field.Tag.Get("op"))
+		fieldValue := fieldValueAny(fv)
+		fieldValue = convertValueByDBType(fieldValue, f.Opts["type"])
+		appendWhereExpr(c, f.Name, fieldValue, f.Field.Tag.Get("op"))
 	}
-
-	for i := 0; i < v.NumField(); i++ {
-		field := v.Field(i)
-		fieldType := t.Field(i)
-		if field.IsZero() && fieldType.Type.Kind() != reflect.Slice {
-			continue
-		}
-		name, after := ColNameFromTag(fieldType, getTagName(opt))
-		if name == "" {
-			continue
-		}
-
-		fieldValue := convertValueByDBType(dereferencedValue(field).Interface(), ParseOptionStr(after)["type"])
-		dst = appendWhereExpr(c, dst, name, fieldValue, fieldType.Tag.Get("op"))
-	}
-	return dst
 }
 
-// WhereFromKVs 根据 KVs 生成 WHERE 表达式，并追加到 dst 后返回。
+// whereFromKVs 根据 KVs 生成 WHERE 表达式，并追加到 dst 后返回。
 //
 // 每个 KV 的 Extra 字段是条件操作符（规则同 WhereFromStruct 的 op tag）；
 // Extra 为空时，切片值生成 IN，其余生成 =。
 //
 // 与结构体过滤不同，KVs 不会跳过零值，因此适合过滤 status=0 这类场景。
-func WhereFromKVs(c *Cond, filter KVs, dst []string) []string {
+func whereFromKVs(c *condition, filter KVs) {
 	if filter == nil {
-		return dst
+		return
 	}
 	for _, kv := range filter {
-		dst = appendWhereExpr(c, dst, kv.Key, kv.Value, kv.Extra)
+		appendWhereExpr(c, kv.Key, kv.Value, kv.Extra)
 	}
-	return dst
 }
 
 // WhereFrom 根据 filter 生成 WHERE 表达式，并追加到 dst 后返回。
@@ -104,71 +73,118 @@ func WhereFromKVs(c *Cond, filter KVs, dst []string) []string {
 //   - struct：跳过零值字段生成条件；
 //   - slice：转换为主键 IN (...)；
 //   - 其他单值：转换为主键 = ?。
-func WhereFrom(c *Cond, filter any, dst []string, opts ...*Option) []string {
-	opt := optionFrom(context.Background(), opts)
+//   - 如果 filter 中出现了非法 column，会忽略该条件。
+func WhereFrom(ctx context.Context, c *condition, filter any) {
+	opt := Opt(ctx)
 	if filter == nil {
-		return dst
+		return
+	}
+
+	if kv, ok := filter.(KV); ok {
+		whereFromKVs(c, KVs{kv})
+		return
 	}
 	if kvs, ok := filter.(KVs); ok {
-		return WhereFromKVs(c, kvs, dst)
+		whereFromKVs(c, kvs)
+		return
 	}
 	if m, ok := filter.(map[string]any); ok {
-		return WhereFromKVs(c, KVsFromMap(nil, m), dst)
+		whereFromKVs(c, KVsFromMap(nil, m))
+		return
 	}
 	t := dereferencedType(reflect.TypeOf(filter))
 	if kind := t.Kind(); kind == reflect.Struct {
-		return WhereFromStruct(c, filter, dst, opt)
+		whereFromStruct(ctx, c, filter)
+		return
 	} else if kind == reflect.Slice {
-		dst = append(dst, c.In(getPrimaryKey(opt), Any2Slice(filter)...))
+		c.In(getPrimaryKey(opt), Any2Slice(filter)...)
 	} else {
-		dst = append(dst, c.E(getPrimaryKey(opt), filter))
+		c.E(getPrimaryKey(opt), filter)
 	}
-	return dst
+	i := 0
+	for _, cond := range c.exprs {
+		if cond != "" {
+			c.exprs[i] = cond
+			i++
+		}
+	}
+	c.exprs = c.exprs[:i]
 }
 
-func appendWhereExpr(c *Cond, dst []string, column string, value any, op string) []string {
+// appendWhereExpr 根据 column、value 和 op 生成 WHERE 表达式，并追加到 dst 后返回。
+//
+// op 支持：
+//   - e/eq/equal：生成 = 条件；
+//   - ne/neq：生成 <> 条件；
+//   - gt：生成 > 条件；
+//   - gte：生成 >= 条件；
+//   - lt：生成 < 条件；
+//   - lte：生成 <= 条件；
+//   - in：生成 IN 条件；
+//   - notin：生成 NOT IN 条件；
+//   - like：生成 LIKE 条件；
+//   - notlike：生成 NOT LIKE 条件；
+//   - 未写 op 时，切片值生成 IN，其余生成 =。
+//   - 非法的 op 值会被忽略不处理。
+func appendWhereExpr(c *condition, column string, value any, op string) {
+	if err := ValidateColumnName(column); err != nil {
+		return
+	}
 	switch op {
 	case "e", "eq", "equal":
-		dst = append(dst, c.E(column, value))
+		c.E(column, value)
 	case "ne", "neq":
-		dst = append(dst, c.NE(column, value))
+		c.NE(column, value)
 	case "gt":
-		dst = append(dst, c.GreaterThan(column, value))
+		c.GreaterThan(column, value)
 	case "gte":
-		dst = append(dst, c.GreaterEqualThan(column, value))
+		c.GreaterEqualThan(column, value)
 	case "lt":
-		dst = append(dst, c.LessThan(column, value))
+		c.LessThan(column, value)
 	case "lte":
-		dst = append(dst, c.LessEqualThan(column, value))
+		c.LessEqualThan(column, value)
 	case "in":
-		dst = append(dst, c.In(column, Any2Slice(value)...))
+		c.In(column, Any2Slice(value)...)
 	case "notin":
-		dst = append(dst, c.NotIn(column, Any2Slice(value)...))
+		c.NotIn(column, Any2Slice(value)...)
 	case "like":
 		sv, ok := value.(string)
 		if !ok || len(sv) == 0 {
 			break
 		}
 		sv = "%" + sv + "%"
-		dst = append(dst, c.Like(column, sv))
+		c.Like(column, sv)
 	case "notlike":
 		sv, ok := value.(string)
 		if !ok || len(sv) == 0 {
 			break
 		}
 		sv = "%" + sv + "%"
-		dst = append(dst, c.NotLike(column, sv))
-	default:
+		c.NotLike(column, sv)
+	case "":
 		if value != nil && dereferencedType(reflect.TypeOf(value)).Kind() == reflect.Slice {
-			dst = append(dst, c.In(column, Any2Slice(value)...))
+			c.In(column, Any2Slice(value)...)
 		} else {
-			dst = append(dst, c.E(column, value))
+			c.E(column, value)
 		}
 	}
-	return dst
 }
 
 var tableNamePattern = regexp.MustCompile(`^[A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)?$`)
+
+// ValidateColumnName 校验表名能否直接用于 SQL。
+//
+// 表名不能为空，只能包含 ASCII 字母、数字、'_' 和 '$'，可选带一个 schema 前缀，
+// 如 "schema.table"；"a.b.c"、空格、分号等都会返回错误。
+func ValidateColumnName(name string) error {
+	if name == "" {
+		return fmt.Errorf("orm: column name is empty")
+	}
+	if !tableNamePattern.MatchString(name) {
+		return fmt.Errorf("orm: invalid column name %q", name)
+	}
+	return nil
+}
 
 // ValidateTableName 校验表名能否直接用于 SQL。
 //
@@ -196,10 +212,10 @@ func ValidateTableName(name string) error {
 //
 // 注意：
 //   - 表名必须是合法标识符，否则返回错误；非结构体（如 int64、KVs、map）推导出的
-//     名字通常非法，应改用 opt.Table 显式指定；
+//     名字通常非法，应改用 Option.With(ctx) 传入 Table(...) 显式指定；
 //   - 前缀判断使用字符串前缀匹配， 如果表名已包含前缀，则不添加。
-func TableName(d any, opts ...*Option) (string, error) {
-	opt := optionFrom(context.Background(), opts)
+func TableName(ctx context.Context, d any) (string, error) {
+	opt := Opt(ctx)
 	// generate table name from structure name of d
 	var (
 		name        string
@@ -212,8 +228,11 @@ func TableName(d any, opts ...*Option) (string, error) {
 	}
 
 	if name == "" && d != nil {
-		switch d.(type) {
+		switch x := d.(type) {
 		case KVs, KV:
+			// do not handle this type data
+		case interface{ Table() string }:
+			name = x.Table()
 		default:
 			t := dereferencedElemType(reflect.TypeOf(d))
 			v := reflect.New(t).Interface()
@@ -244,31 +263,6 @@ func TableName(d any, opts ...*Option) (string, error) {
 		return "", err
 	}
 	return name, nil
-}
-
-// ColNameFromTag 解析结构体字段的列名和 tag 附加选项。
-//
-// 解析规则：
-//   - 非导出字段、func 和 chan 字段返回空列名，调用方应跳过；
-//   - `db:"-"` 表示忽略该字段；
-//   - `db:"name,opt1,opt2"` 返回 "name" 和 "opt1,opt2"；
-//   - 未写列名时使用 strings.ToLower(FieldName)，不会自动转 snake_case
-//     （例如 UserID 默认列名为 "userid"）。
-func ColNameFromTag(field reflect.StructField, tagName string) (string, string) {
-	if !field.IsExported() {
-		return "", ""
-	}
-	switch field.Type.Kind() {
-	case reflect.Func, reflect.Chan:
-		return "", ""
-	}
-	name, after, _ := strings.Cut(field.Tag.Get(tagName), ",")
-	if name == "-" {
-		return "", ""
-	} else if name == "" {
-		return strings.ToLower(field.Name), after
-	}
-	return name, after
 }
 
 func getPrimaryKey(opt *Option) string {
@@ -329,9 +323,11 @@ func walkStructFields(t reflect.Type, dst []structField, tagName string, prefix 
 		for ft.Kind() == reflect.Ptr {
 			ft = ft.Elem()
 		}
+		opts := str.ParseOptionStr(after)
+		_, hasInlineOption := opts["inline"]
 
-		inline := (name == "" && strings.Contains(after, "inline")) || (name == "" && !hasTag && field.Anonymous)
-		if inline && ft.Kind() == reflect.Struct {
+		inline := (name == "" && hasInlineOption) || (name == "" && !hasTag && field.Anonymous)
+		if inline && ft.Kind() == reflect.Struct && ft.Name() != "Time" {
 			dst = walkStructFields(ft, dst, tagName, index)
 			continue
 		}
@@ -345,7 +341,7 @@ func walkStructFields(t reflect.Type, dst []structField, tagName string, prefix 
 			Name:  name,
 			Index: index,
 			Field: field,
-			Opts:  ParseOptionStr(after),
+			Opts:  str.ParseOptionStr(after),
 		})
 	}
 	return dst
@@ -378,39 +374,4 @@ func fieldValueAny(v reflect.Value) any {
 		return nil
 	}
 	return v.Interface()
-}
-
-// ColNamesWithTagOpt 返回结构体字段的列名列表，每项形如 "table.column"。
-//
-// d 必须是结构体或结构体指针；其他类型返回空切片且不返回错误。dbOption 为空时返回全部
-// 可导出字段；dbOption 非空时只保留 db 选项中含有该 key 的字段，例如 dbOption="insert"
-// 对应 `db:",insert"`。
-//
-// dbTag 的默认值为 DefaultTagName，即 "db"。
-func ColNamesWithTagOpt(d interface{}, dbOption string, dbTag string) ([]string, error) {
-	vt := reflect.TypeOf(d)
-	if vt == nil {
-		return []string{}, nil
-	}
-	for vt.Kind() == reflect.Ptr {
-		vt = vt.Elem()
-	}
-	if vt.Kind() != reflect.Struct {
-		return []string{}, nil
-	}
-	if dbTag == "" {
-		dbTag = DefaultTagName
-	}
-
-	var cols []string
-
-	for _, f := range structFields(vt, dbTag) {
-		if dbOption != "" {
-			if _, ok := f.Opts[dbOption]; !ok {
-				continue
-			}
-		}
-		cols = append(cols, f.Name)
-	}
-	return cols, nil
 }

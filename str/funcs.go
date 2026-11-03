@@ -385,6 +385,51 @@ func SnakeCase(name string) string {
 	return b.String()
 }
 
+// ParseOptionStr 解析形如 "k1:v1,k2:v2,k3:v3" 的选项字符串，始终返回非 nil 的 map。
+//
+// 示例：
+//   - "k1:v1,k2:v2" -> {"k1":"v1", "k2":"v2"}
+//   - "k1,k2"       -> {"k1":"", "k2":""}
+//   - "k1:v2,k2"    -> {"k1":"v2", "k2":""}
+//   - `k1:a\,b`     -> {"k1":"a,b"}
+//
+// 逗号可以用 `\,` 转义后作为 key 或 value 的一部分。key 以第一个未转义的 ':' 分隔，
+// ':' 之后的内容（包括后续的 ':'）全部作为 value；空 key 会被忽略。
+func ParseOptionStr(str string) map[string]string {
+	options := map[string]string{}
+	if str == "" {
+		return options
+	}
+
+	var part strings.Builder
+	flush := func() {
+		if part.Len() == 0 {
+			return
+		}
+		k, v, _ := strings.Cut(part.String(), ":")
+		part.Reset()
+		if k != "" {
+			options[k] = v
+		}
+	}
+
+	for i := 0; i < len(str); i++ {
+		if str[i] == '\\' && i+1 < len(str) && str[i+1] == ',' {
+			part.WriteByte(',')
+			i++
+			continue
+		}
+		if str[i] == ',' {
+			flush()
+			continue
+		}
+		part.WriteByte(str[i])
+	}
+	flush()
+
+	return options
+}
+
 var (
 	varChars     = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._"
 	varCharTable [128]bool

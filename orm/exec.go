@@ -10,25 +10,25 @@ import (
 	"runtime/debug"
 )
 
-// RunTxContext 在一个事务中执行 f，并在 f 返回后自动提交或回滚。
+// RunTx 在一个事务中执行 f，并在 f 返回后自动提交或回滚。
 //
-// 如果 ctx 中已经带有事务（通过 opt.Tx 或 Option.With 传入），本函数不会开启新事务，
-// 而是直接复用已有事务执行 f；MySQL 不支持嵌套事务，因此内层调用没有独立保存点。
+// 如果 ctx 中已经带有事务（通过 opt.WithTx + Option.With 传入），本函数不会开启新事务，
+// 而是直接复用已有事务执行 f；
 //
 // f 返回错误时回滚并把错误返回；f 内部 panic 时回滚并返回包含堆栈的错误。回滚错误会
 // 与业务错误通过 errors.Join 合并。
 //
 // 注意：事务使用主库连接；f 中应使用传入的 ctx 调用本包的 Exec/Select/Get，才能保证
 // 复用事务连接。
-func RunTxContext(ctx context.Context, f func(ctx context.Context) error) error {
-	return RunTxWithOptionContext(ctx, nil, f)
+func RunTx(ctx context.Context, f func(ctx context.Context) error) error {
+	return RunTxWithTxOption(ctx, nil, f)
 }
 
-// RunTxWithOptionContext 与 RunTxContext 相同，但可以指定 sql.TxOptions（隔离级别、
+// RunTxWithTxOption 与 RunTx 相同，但可以指定 sql.TxOptions（隔离级别、
 // 只读等）。
 //
 // 如果 ctx 中已经在事务中，opts 会被忽略，直接复用已有事务。
-func RunTxWithOptionContext(ctx context.Context, opts *sql.TxOptions, f func(ctx context.Context) error) (err error) {
+func RunTxWithTxOption(ctx context.Context, opts *sql.TxOptions, f func(ctx context.Context) error) (err error) {
 	opt := Opt(ctx)
 	// already in transaction
 	if opt.tx != nil {
@@ -36,7 +36,8 @@ func RunTxWithOptionContext(ctx context.Context, opts *sql.TxOptions, f func(ctx
 	}
 
 	var (
-		tx *Tx
+		tx   *txWrapper
+		ferr error
 	)
 
 	// A locked connection must also own the transaction, otherwise the
@@ -45,34 +46,39 @@ func RunTxWithOptionContext(ctx context.Context, opts *sql.TxOptions, f func(ctx
 		var rawTx *sql.Tx
 		rawTx, err = conn.BeginTx(ctx, opts)
 		if err == nil {
-			tx = &Tx{Tx: rawTx}
+			tx = &txWrapper{Tx: rawTx}
 		}
 	} else {
-		var db *DB
+		var db *dbWrapper
 		db, err = opt.db(true)
 		if err != nil {
 			return
 		}
-		tx, err = db.BeginTxx(ctx, opts)
+		tx, err = db.BeginTx(ctx, opts)
 	}
 	if err != nil {
 		return
 	}
-	var ferr error
 
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("panic: %v\n%s", r, debug.Stack())
 			err = errors.Join(err, tx.Rollback())
 		}
+	}()
+
+	defer func() {
 		if ferr != nil {
 			err = errors.Join(ferr, tx.Rollback())
 		}
+		if err != nil {
+			err = errors.Join(err, tx.Rollback())
+		}
 	}()
 
-	ferr = f(opt.Tx(tx).With(ctx))
+	ferr = f(opt.WithTx(tx.Tx).With(ctx))
 	if ferr != nil {
-		return err
+		return
 	}
 
 	err = tx.Commit()
@@ -115,7 +121,7 @@ func runInTableLock(ctx context.Context, table, mode string, f func(ctx context.
 	if table == "" {
 		return fmt.Errorf("orm: table is required")
 	}
-	if Opt(ctx).GetTx() != nil {
+	if Opt(ctx).Tx() != nil {
 		return fmt.Errorf("orm: cannot lock tables inside a transaction")
 	}
 	if connFromContext(ctx) != nil {
@@ -151,11 +157,11 @@ func runInTableLock(ctx context.Context, table, mode string, f func(ctx context.
 // 执行连接的选取优先级：ctx 中的事务 > ctx 中的锁定连接 > 主库连接池。
 // sql 与 args 原样交给驱动，本函数不做任何校验或转义。
 func Exec(ctx context.Context, sql string, args ...interface{}) (driver.Result, error) {
-	slog.DebugContext(ctx, "Executing sql query", "query", sql, "args", args)
+	slog.InfoContext(ctx, "Executing sql query", "query", sql, "args", args)
 	emitMetric(ctx, sql)
 
 	opt := Opt(ctx)
-	if tx := opt.GetTx(); tx != nil {
+	if tx := opt.Tx(); tx != nil {
 		return tx.ExecContext(ctx, sql, args...)
 	}
 	if conn := connFromContext(ctx); conn != nil {
@@ -179,14 +185,15 @@ func Exec(ctx context.Context, sql string, args ...interface{}) (driver.Result, 
 // 坑：结构体扫描要求结果集的每一列都能在结构体中找到对应字段（默认按 tag 或字段名
 // 小写匹配），否则返回 "missing destination name" 错误。
 func Select(ctx context.Context, dest interface{}, sql string, args ...interface{}) error {
-	fromMaster := Opt(ctx).fromMaster
+	opt := Opt(ctx)
+	fromMaster := opt.fromMaster
 	if fromMaster {
 		slog.InfoContext(ctx, "Selecting on master", "query", sql, "args", args)
 	} else {
 		slog.DebugContext(ctx, "Selecting on slave", "query", sql, "args", args)
 	}
 	emitMetric(ctx, sql)
-	if tx := Opt(ctx).GetTx(); tx != nil {
+	if tx := opt.Tx(); tx != nil {
 		return tx.SelectContext(ctx, dest, sql, args...)
 	}
 	if conn := connFromContext(ctx); conn != nil {
@@ -197,7 +204,7 @@ func Select(ctx context.Context, dest interface{}, sql string, args ...interface
 		defer rows.Close()
 		return scanAll(ctx, rows, dest)
 	}
-	db, err := Opt(ctx).db(fromMaster)
+	db, err := opt.db(fromMaster)
 	if err != nil {
 		return err
 	}
@@ -213,14 +220,15 @@ func Select(ctx context.Context, dest interface{}, sql string, args ...interface
 //
 // 坑：dest 必须是非 nil 指针；结构体扫描要求结果集的每一列都能匹配到字段，否则返回错误。
 func Get(ctx context.Context, dest interface{}, sql string, args ...interface{}) error {
-	fromMaster := Opt(ctx).fromMaster
+	opt := Opt(ctx)
+	fromMaster := opt.fromMaster
 	if fromMaster {
 		slog.InfoContext(ctx, "Getting on master", "query", sql, "args", args)
 	} else {
 		slog.DebugContext(ctx, "Getting on slave", "query", sql, "args", args)
 	}
 	emitMetric(ctx, sql)
-	if tx := Opt(ctx).GetTx(); tx != nil {
+	if tx := opt.Tx(); tx != nil {
 		return tx.GetContext(ctx, dest, sql, args...)
 	}
 	if conn := connFromContext(ctx); conn != nil {
@@ -231,7 +239,7 @@ func Get(ctx context.Context, dest interface{}, sql string, args ...interface{})
 		defer rows.Close()
 		return scanOne(ctx, rows, dest)
 	}
-	db, err := Opt(ctx).db(fromMaster)
+	db, err := opt.db(fromMaster)
 	if err != nil {
 		return err
 	}

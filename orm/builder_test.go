@@ -1,6 +1,7 @@
 package orm
 
 import (
+	"context"
 	"testing"
 )
 
@@ -35,7 +36,11 @@ func TestTableName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := TableName(tt.data, tt.opt)
+			ctx := context.Background()
+			if tt.opt != nil {
+				ctx = tt.opt.With(ctx)
+			}
+			got, err := TableName(ctx, tt.data)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("TableName() = %q, want error", got)

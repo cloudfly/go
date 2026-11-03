@@ -20,32 +20,30 @@ import (
 //   - data 为 nil 或非结构体时直接返回 nil（不做任何更新）；
 //   - 没有任何可更新字段时同样返回 nil，不会报错；
 //   - 表名推导依赖 data，因此 data 不能是零值结构体（否则表名推导失败）。
-func PatchByID[ID comparable](ctx context.Context, id ID, data any, opts ...*Option) error {
-	opt := optionFrom(ctx, opts)
-	ub, ok, err := NewUpdateBuilderFromStruct(data, opt)
+func PatchByID[ID comparable](ctx context.Context, id ID, data any) (int64, error) {
+	opt := Opt(ctx)
+	ub, err := NewUpdateBuilderFromStruct(ctx, data)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	if !ok {
-		return nil
+	WhereFrom(ctx, &ub.condition, id)
+	if len(ub.condition.exprs) == 0 {
+		return 0, fmt.Errorf("at least one filter condition in Update SQL")
 	}
-	conds := WhereFrom(&ub.Cond, id, nil, opt)
-	if len(conds) == 0 {
-		return fmt.Errorf("at least one filter condition in Update SQL")
-	}
-	ub = ub.Where(conds...)
+	ub = ub.Where(ub.condition.exprs...)
 	var (
 		sql  string
 		args []any
 	)
-	sql, args = Build(ctx, ub)
+	sql, args = ub.Build()
 
-	_, err = Exec(opt.With(ctx), sql, args...)
+	r, err := Exec(ctx, sql, args...)
 
 	if err == nil && opt.cacheProvider != nil {
 		opt.cacheProvider.Remove(ub.table, id)
 	}
-	return err
+
+	return r.RowsAffected()
 }
 
 // PatchWhere 根据自定义条件更新数据，返回受影响的行数。
@@ -57,29 +55,27 @@ func PatchByID[ID comparable](ctx context.Context, id ID, data any, opts ...*Opt
 //   - filter 为 nil 或零值结构体时无法生成条件，返回错误以避免更新全表（空切片会生成
 //     "0 = 1"，不报错但不会更新任何行）；
 //   - 零值字段会被跳过，无法把列更新为 0/""/nil；
-//   - filter 不是结构体时，表名仍需从 data 推导，必要时用 opt.Table 指定。
-func PatchWhere(ctx context.Context, data any, filter any, opts ...*Option) (int64, error) {
-	opt := optionFrom(ctx, opts)
-	ub, ok, err := NewUpdateBuilderFromStruct(data, opt)
+//   - filter 不是结构体时，表名仍需从 data 推导，必要时用 Option.With(ctx) 传入
+//     Table(...) 指定。
+func PatchWhere(ctx context.Context, data any, filter any) (int64, error) {
+	opt := Opt(ctx)
+	ub, err := NewUpdateBuilderFromStruct(ctx, data)
 	if err != nil {
 		return 0, err
 	}
-	if !ok {
-		return 0, nil
-	}
-	conds := WhereFrom(&ub.Cond, filter, nil, opt)
-	if len(conds) == 0 {
+	WhereFrom(ctx, &ub.condition, filter)
+	if len(ub.condition.exprs) == 0 {
 		return 0, fmt.Errorf("at least one filter condition in Update SQL")
 	}
-	ub = ub.Where(conds...)
+	ub = ub.Where(ub.condition.exprs...)
 	var (
 		sql  string
 		args []any
 		r    driver.Result
 	)
-	sql, args = Build(ctx, ub)
+	sql, args = ub.Build()
 
-	r, err = Exec(opt.With(ctx), sql, args...)
+	r, err = Exec(ctx, sql, args...)
 	if err != nil {
 		return 0, err
 	}
@@ -89,47 +85,47 @@ func PatchWhere(ctx context.Context, data any, filter any, opts ...*Option) (int
 	return r.RowsAffected()
 }
 
-// NewUpdateBuilderFromStruct 根据结构体的非零字段创建 UPDATE 构建器。
-//
-// 第二个返回值 ok 表示是否生成了 SET 条件：data 为 nil 或非结构体时返回
-// (nil, false, nil)，调用方通常应直接跳过执行。匿名嵌入结构体会与扫描一致地展开。
+// NewUpdateBuilderFromStruct 根据结构体的非零字段创建 UPDATE 构建器，如果没有从 data 中获取到可更新字段，则返回错误。
 //
 // 字段 tag 选项：
 //   - `db:",incr"` / `db:",decr"`：生成自增/自减 1（字段值本身不参与 SQL）；
 //   - `db:",add:1.5"` / sub / mul / div：生成加减乘除常量表达式；
 //   - 其他字段生成 column = ?，值为字段当前值。
 //
-// 坑：
-//   - 零值字段会先被跳过，因此 incr/decr/add 等选项要求字段本身是非零占位值（通常填 1），
-//     否则整个字段不会进入 SET；
+// 注意：
+//   - 主键会被忽略，不可更新
 //   - add/sub/mul/div 的值直接格式化进 SQL，非法数值会返回错误；
-//   - 若所有字段都是零值，返回的 builder 没有 SET 内容，执行会得到非法 SQL。
-func NewUpdateBuilderFromStruct(data any, opts ...*Option) (*UpdateBuilder, bool, error) {
+func NewUpdateBuilderFromStruct(ctx context.Context, data any) (*UpdateBuilder, error) {
 	if data == nil {
-		return nil, false, nil
+		return nil, fmt.Errorf("data is nil")
 	}
-	opt := optionFrom(nil, opts)
-	table, err := TableName(data, opt)
+	opt := Opt(ctx)
+	table, err := TableName(ctx, data)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	ub := NewUpdateBuilder().Update(table)
 
 	v := dereferencedValue(reflect.ValueOf(data))
 	if !v.IsValid() {
-		return nil, false, nil
+		return nil, fmt.Errorf("data is zero value")
 	}
 
 	t := v.Type()
 	if t.Kind() != reflect.Struct {
-		return nil, false, nil
+		return nil, fmt.Errorf("data type must be struct")
 	}
 
 	assigned := false
+	primaryKey := getPrimaryKey(opt)
 
 	for _, f := range structFields(t, getTagName(opt)) {
+		if f.Name == primaryKey {
+			// 主键不参与更新
+			continue
+		}
 		field := fieldValueByIndex(v, f.Index)
-		if !field.IsValid() || field.IsZero() {
+		if !field.IsValid() {
 			continue
 		}
 
@@ -145,75 +141,34 @@ func NewUpdateBuilderFromStruct(data any, opts ...*Option) (*UpdateBuilder, bool
 			if fv, err := floats.Float64(f.Opts["add"]); err == nil {
 				ub = ub.SetMore(ub.Add(f.Name, fv))
 			} else {
-				return nil, false, fmt.Errorf("invalid add value: %v", f.Opts["add"])
+				return nil, fmt.Errorf("invalid add value: %v", f.Opts["add"])
 			}
 		case f.Opts["sub"] != "":
 			if fv, err := floats.Float64(f.Opts["sub"]); err == nil {
 				ub = ub.SetMore(ub.Sub(f.Name, fv))
 			} else {
-				return nil, false, fmt.Errorf("invalid sub value: %v", f.Opts["sub"])
+				return nil, fmt.Errorf("invalid sub value: %v", f.Opts["sub"])
 			}
 		case f.Opts["mul"] != "":
 			if fv, err := floats.Float64(f.Opts["mul"]); err == nil {
 				ub = ub.SetMore(ub.Mul(f.Name, fv))
 			} else {
-				return nil, false, fmt.Errorf("invalid mul value: %v", f.Opts["mul"])
+				return nil, fmt.Errorf("invalid mul value: %v", f.Opts["mul"])
 			}
 		case f.Opts["div"] != "":
 			if fv, err := floats.Float64(f.Opts["div"]); err == nil {
 				ub = ub.SetMore(ub.Div(f.Name, fv))
 			} else {
-				return nil, false, fmt.Errorf("invalid div value: %v", f.Opts["div"])
+				return nil, fmt.Errorf("invalid div value: %v", f.Opts["div"])
 			}
 		default:
 			ub = ub.SetMore(ub.Assign(f.Name, fieldValue))
 		}
 		assigned = true
-
+	}
+	if !assigned {
+		return nil, fmt.Errorf("no field assigned")
 	}
 
-	return ub, assigned, nil
-
-	for i := 0; i < v.NumField(); i++ {
-		field := v.Field(i)
-		fieldType := t.Field(i)
-		if field.IsZero() {
-			continue
-		}
-
-		name, after := ColNameFromTag(fieldType, getTagName(opt))
-		if name == "" {
-			continue
-		}
-		opts := ParseOptionStr(after)
-		fieldValue := convertValueByDBType(dereferencedValue(field).Interface(), opts["type"])
-		_, hasIncr := opts["incr"]
-		_, hasDecr := opts["decr"]
-		switch {
-		case hasIncr:
-			ub = ub.SetMore(ub.Incr(name))
-		case hasDecr:
-			ub = ub.SetMore(ub.Decr(name))
-		case opts["add"] != "":
-			if f, err := floats.Float64(opts["add"]); err == nil {
-				ub = ub.SetMore(ub.Add(name, f))
-			}
-		case opts["sub"] != "":
-			if f, err := floats.Float64(opts["sub"]); err == nil {
-				ub = ub.SetMore(ub.Sub(name, f))
-			}
-		case opts["mul"] != "":
-			if f, err := floats.Float64(opts["mul"]); err == nil {
-				ub = ub.SetMore(ub.Mul(name, f))
-			}
-		case opts["div"] != "":
-			if f, err := floats.Float64(opts["div"]); err == nil {
-				ub = ub.SetMore(ub.Div(name, f))
-			}
-		default:
-			ub = ub.SetMore(ub.Assign(name, fieldValue))
-		}
-		assigned = true
-	}
-	return ub, assigned, nil
+	return ub, nil
 }

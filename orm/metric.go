@@ -54,7 +54,6 @@ func emitMetric(ctx context.Context, sql string) {
 		if idx := strings.Index(upper, " FROM "); idx > 0 {
 			sql = strings.TrimSpace(sql[idx+6:])
 		}
-		return
 	default:
 		return
 	}
@@ -73,8 +72,7 @@ func emitMetric(ctx context.Context, sql string) {
 
 // SetMetricHandler 设置全局指标回调。
 //
-// 传入 nil 会被忽略（不会清除已有回调）；该设置是进程级全局状态，并发安全，但后设置
-// 的会覆盖先设置的。
+// 传入 nil 会 禁用 metric 功能.
 func SetMetricHandler(h MetricHandler) {
 	if h == nil {
 		metricHandler.Store(nil)

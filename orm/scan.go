@@ -8,21 +8,12 @@ import (
 	"sync"
 )
 
-// DB 包装 database/sql.DB，并提供把查询结果扫描到结构体/切片的辅助方法。
+// dbWrapper 包装 database/sql.dbWrapper，并提供把查询结果扫描到结构体/切片的辅助方法。
 //
 // 这些方法直接使用底层连接，不读取 Option，也不会自动选择主/从库或使用缓存；
 // 需要这些能力请使用本包的 Exec/Select/Get。
-type DB struct {
+type dbWrapper struct {
 	*sql.DB
-}
-
-// NewDB 包装一个已存在的 *sql.DB。
-//
-// The argument db must be non-nil. Otherwise it will raise panic on the method invocation.
-//
-// 传入 nil 会返回非 nil 的 *DB，但后续调用会因空指针而 panic。
-func NewDB(db *sql.DB) *DB {
-	return &DB{DB: db}
 }
 
 // SelectContext 执行查询并把所有行扫描到 dest。
@@ -31,7 +22,7 @@ func NewDB(db *sql.DB) *DB {
 //
 // 坑：结果集的每一列都必须能在结构体中找到对应字段，否则返回 "missing destination
 // name" 错误；不支持忽略未知列。
-func (d *DB) SelectContext(ctx context.Context, dest any, query string, args ...any) error {
+func (d *dbWrapper) SelectContext(ctx context.Context, dest any, query string, args ...any) error {
 	rows, err := d.DB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return err
@@ -44,7 +35,7 @@ func (d *DB) SelectContext(ctx context.Context, dest any, query string, args ...
 //
 // 没有数据时返回 sql.ErrNoRows。dest 须为非 nil 指针；结构体字段匹配规则同
 // SelectContext。
-func (d *DB) GetContext(ctx context.Context, dest any, query string, args ...any) error {
+func (d *dbWrapper) GetContext(ctx context.Context, dest any, query string, args ...any) error {
 	rows, err := d.DB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return err
@@ -53,26 +44,26 @@ func (d *DB) GetContext(ctx context.Context, dest any, query string, args ...any
 	return scanOne(ctx, rows, dest)
 }
 
-// BeginTxx 开启事务并返回包装后的 *Tx。
+// BeginTx 开启事务并返回包装后的 *Tx。
 //
 // 事务始终在 d 对应的连接池上开启；多行语句应通过返回的 Tx 执行。
-func (d *DB) BeginTxx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) {
+func (d *dbWrapper) BeginTx(ctx context.Context, opts *sql.TxOptions) (*txWrapper, error) {
 	tx, err := d.DB.BeginTx(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
-	return &Tx{Tx: tx}, nil
+	return &txWrapper{Tx: tx}, nil
 }
 
-// Tx 包装 database/sql.Tx，并提供与 DB 相同的结构体扫描辅助方法。
-type Tx struct {
+// txWrapper 包装 database/sql.txWrapper，并提供与 DB 相同的结构体扫描辅助方法。
+type txWrapper struct {
 	*sql.Tx
 }
 
 // SelectContext 使用当前事务执行查询，并把所有行扫描到 dest。
 //
 // dest 必须是指向切片的指针；若 dest 实现了 sql.Scanner，则只扫描一行。
-func (t *Tx) SelectContext(ctx context.Context, dest any, query string, args ...any) error {
+func (t *txWrapper) SelectContext(ctx context.Context, dest any, query string, args ...any) error {
 	rows, err := t.Tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return err
@@ -84,7 +75,7 @@ func (t *Tx) SelectContext(ctx context.Context, dest any, query string, args ...
 // GetContext 使用当前事务执行查询，并最多扫描一行到 dest。
 //
 // 没有数据时返回 sql.ErrNoRows。
-func (t *Tx) GetContext(ctx context.Context, dest any, query string, args ...any) error {
+func (t *txWrapper) GetContext(ctx context.Context, dest any, query string, args ...any) error {
 	rows, err := t.Tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return err
