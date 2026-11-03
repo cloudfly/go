@@ -60,19 +60,26 @@ func RunTxWithTxOption(ctx context.Context, opts *sql.TxOptions, f func(ctx cont
 		return
 	}
 
+	rollbacked := false
+	rollback := func() error {
+		if rollbacked {
+			return nil
+		}
+		rerr := tx.Rollback()
+		rollbacked = true
+		return rerr
+	}
+
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("panic: %v\n%s", r, debug.Stack())
-			err = errors.Join(err, tx.Rollback())
+			err = errors.Join(err, rollback())
 		}
-	}()
-
-	defer func() {
 		if ferr != nil {
-			err = errors.Join(ferr, tx.Rollback())
+			err = errors.Join(ferr, rollback())
 		}
 		if err != nil {
-			err = errors.Join(err, tx.Rollback())
+			err = errors.Join(err, rollback())
 		}
 	}()
 

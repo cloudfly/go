@@ -125,10 +125,17 @@ func Any2Slice(data any) []any {
 		return []any{}
 	}
 	v := reflect.ValueOf(data)
-	t := reflect.TypeOf(data)
+
+	for k := v.Kind(); k == reflect.Ptr || k == reflect.Interface; k = v.Kind() {
+		v = v.Elem()
+	}
+
+	t := v.Type()
+
 	if t.Kind() != reflect.Slice {
 		return []any{data}
 	}
+
 	var iface []interface{}
 	for i := 0; i < v.Len(); i++ {
 		iface = append(iface, v.Index(i).Interface())

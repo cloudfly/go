@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/cloudfly/go/str"
+	"github.com/cloudfly/go/types"
 )
 
 const (
@@ -227,7 +228,7 @@ func TableName(ctx context.Context, d any) (string, error) {
 		name = opt.table
 	}
 
-	if name == "" && d != nil {
+	if name == "" && !types.IsNil(d) {
 		switch x := d.(type) {
 		case KVs, KV:
 			// do not handle this type data
@@ -254,11 +255,8 @@ func TableName(ctx context.Context, d any) (string, error) {
 	if name == "" {
 		return "", fmt.Errorf("orm: table name is empty, use Option.Table() to set it")
 	}
-	if !strings.HasPrefix(name, tablePrefix) {
-		// try to prepend the table name prefix specified in option
-		name = tablePrefix + name
-	}
 
+	name = tablePrefix + name
 	if err := ValidateTableName(name); err != nil {
 		return "", err
 	}

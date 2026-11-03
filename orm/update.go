@@ -7,6 +7,7 @@ import (
 	"reflect"
 
 	"github.com/cloudfly/go/floats"
+	"github.com/cloudfly/go/types"
 )
 
 // PatchByID 根据主键更新一行数据。
@@ -131,8 +132,13 @@ func NewUpdateBuilderFromStruct(ctx context.Context, data any) (*UpdateBuilder, 
 		if !field.IsValid() {
 			continue
 		}
+		fieldValue := fieldValueAny(field)
+		if types.IsNil(fieldValue) {
+			// ignore nil value
+			continue
+		}
 
-		fieldValue := convertValueByDBType(fieldValueAny(field), f.Opts["type"])
+		fieldValue = convertValueByDBType(fieldValue, f.Opts["type"])
 		_, hasIncr := f.Opts["incr"]
 		_, hasDecr := f.Opts["decr"]
 		switch {
