@@ -139,7 +139,7 @@ func runInTableLock(ctx context.Context, table, mode string, f func(ctx context.
 	// Defers run LIFO: UNLOCK TABLES is executed before the connection is closed.
 	defer conn.Close()
 
-	if _, err = conn.ExecContext(ctx, "LOCK TABLES "+Escape(table)+" "+mode); err != nil {
+	if _, err = conn.ExecContext(ctx, "LOCK TABLES "+escapeIdentifier(table)+" "+mode); err != nil {
 		return err
 	}
 	// Release the lock even when f fails or panics, while preserving f's error.

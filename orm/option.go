@@ -159,8 +159,8 @@ func (opt *Option) Table(value any) *Option {
 
 // Fields 指定查询返回的列。
 //
-// 仅在 GetWhere/SelectWhere 等读接口中生效；传入空切片表示不指定，由结构体 tag
-// 自动推导列名。
+// 仅在 GetByID/GetWhere/SelectWhere 等读接口中生效；传入空切片表示不指定，由结构体 tag
+// 自动推导列名。列名会被自动转义为标识符，只能传列名，不能传表达式。
 func (opt *Option) Fields(value ...string) *Option {
 	opt.fields = append([]string{}, value...)
 	return opt
@@ -168,7 +168,7 @@ func (opt *Option) Fields(value ...string) *Option {
 
 // Sorts 指定排序，如 "created_at"；以 "-" 开头表示降序，如 "-created_at"。
 //
-// 仅在 SelectWhere 中生效，列名不做校验，请勿传入未受信任的字符串。
+// 仅在 SelectWhere 中生效。列名会被自动转义为标识符，因此只能传列名，不能传表达式。
 func (opt *Option) Sorts(value ...string) *Option {
 	opt.sorts = append([]string{}, value...)
 	return opt

@@ -11,8 +11,8 @@ import (
 // 删除成功且配置了缓存时会调用 RemoveAll 清空该表缓存。
 //
 // 坑：
-//   - filter 为 nil 或零值结构体时无法生成条件，返回错误以避免误删全表（空切片会生成
-//     "0 = 1"，不报错但也不会删除任何行）；
+//   - filter 为 nil 或零值结构体时无法生成条件，返回错误以避免误删全表（空切片同样不会
+//     生成条件，也会返回错误）；
 //   - filter 是 KVs/单值时无法推导表名，必须通过 Option.With(ctx) 传入 Table(...) 指定；
 //   - 结构体过滤会跳过零值字段，无法用结构体删除 status=0 的数据，请改用 KVs。
 func DeleteWhere(ctx context.Context, filter any) error {

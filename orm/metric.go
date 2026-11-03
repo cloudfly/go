@@ -63,11 +63,26 @@ func emitMetric(ctx context.Context, sql string) {
 		sql = sql[i+1:]
 	}
 
-	tableName = strings.Trim(tableName, "` ")
+	tableName = unescapeIdentifier(tableName)
 
 	if tableName != "" {
 		(*h).Emit(ctx, tableName, write)
 	}
+}
+
+// unescapeIdentifier 去掉 Escape 添加的反引号，把 "`db`.`table`" 还原为 "db.table"。
+func unescapeIdentifier(identifier string) string {
+	if identifier == "" {
+		return ""
+	}
+	parts := strings.Split(identifier, ".")
+	for i, part := range parts {
+		part = strings.TrimSpace(part)
+		part = strings.TrimPrefix(part, "`")
+		part = strings.TrimSuffix(part, "`")
+		parts[i] = strings.ReplaceAll(part, "``", "`")
+	}
+	return strings.Join(parts, ".")
 }
 
 // SetMetricHandler 设置全局指标回调。

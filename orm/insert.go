@@ -14,7 +14,7 @@ import (
 //
 // 坑：data 为空时直接返回 nil（不会报错）；字段必须声明 `db:",insert"` 才会被写入，
 // 否则返回错误；完全为零值的结构体行会被静默跳过。
-func InsertIgnore[T ~struct{}](ctx context.Context, data []T) error {
+func InsertIgnore[T any](ctx context.Context, data []T) error {
 	if len(data) == 0 {
 		return nil
 	}
@@ -42,8 +42,8 @@ func InsertIgnore[T ~struct{}](ctx context.Context, data []T) error {
 // 需要事务请配合 RunTx 使用。
 //
 // 坑：data 为空时直接返回 nil；字段必须声明 `db:",insert"`；完全为零值的结构体行会被
-// 静默跳过；不同结构体类型的元素混用可能触发下标越界 panic。
-func InsertMany[T ~struct{}](ctx context.Context, data []T) error {
+// 静默跳过；与 data[0] 类型不一致的元素会被忽略，不会写入。
+func InsertMany[T any](ctx context.Context, data []T) error {
 	if len(data) == 0 {
 		return nil
 	}
@@ -148,7 +148,7 @@ func InsertOne(ctx context.Context, data any) (int64, error) {
 //   - data 中完全为零值（v.IsZero()）的数据会被跳过，不会写入；
 //   - 如果所有行都被跳过则返回 "no values to insert"；
 //   - 单个字段为零值时仍会正常写入零值，不会跳过；
-func NewInsertBuilderFromStruct[T ~struct{}](ctx context.Context, data []T) (*InsertBuilder, error) {
+func NewInsertBuilderFromStruct[T any](ctx context.Context, data []T) (*InsertBuilder, error) {
 	if len(data) <= 0 {
 		return nil, fmt.Errorf("no data to insert")
 	}
@@ -164,7 +164,7 @@ func NewInsertBuilderFromStruct[T ~struct{}](ctx context.Context, data []T) (*In
 		cols         []string
 		insertFields []structField
 	)
-	if t.Kind() != reflect.Struct {
+	if t == nil || t.Kind() != reflect.Struct {
 		return nil, fmt.Errorf("data type must be struct")
 	}
 
@@ -182,12 +182,9 @@ func NewInsertBuilderFromStruct[T ~struct{}](ctx context.Context, data []T) (*In
 
 	lines := 0
 	for _, item := range data {
-		if item == nil {
-			// ignore the nil item in data array
-			continue
-		}
 		v := dereferencedValue(reflect.ValueOf(item))
 		if !v.IsValid() || v.IsZero() {
+			// ignore the nil or zero value item in data array
 			continue
 		}
 		if v.Type() != t {

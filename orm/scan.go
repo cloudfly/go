@@ -218,7 +218,7 @@ type fieldCacheKey struct {
 	tagName string
 }
 
-var fieldCache sync.Map // fieldCacheKey -> map[string][]int
+var fieldCache sync.Map // fieldCacheKey -> map[string]structField
 
 func scanStructFields(ctx context.Context, t reflect.Type) map[string]structField {
 	tagName := getTagName(Opt(ctx))

@@ -38,8 +38,11 @@ func PatchByID[ID comparable](ctx context.Context, id ID, data any) (int64, erro
 	sql, args = ub.Build()
 
 	r, err := Exec(ctx, sql, args...)
+	if err != nil {
+		return 0, err
+	}
 
-	if err == nil && opt.cacheProvider != nil {
+	if opt.cacheProvider != nil {
 		opt.cacheProvider.Remove(ub.table, id)
 	}
 
@@ -52,8 +55,8 @@ func PatchByID[ID comparable](ctx context.Context, id ID, data any) (int64, erro
 // 单值）。表名从 data 推导。更新成功且配置了缓存时会调用 RemoveAll 清空该表缓存。
 //
 // 坑：
-//   - filter 为 nil 或零值结构体时无法生成条件，返回错误以避免更新全表（空切片会生成
-//     "0 = 1"，不报错但不会更新任何行）；
+//   - filter 为 nil 或零值结构体时无法生成条件，返回错误以避免更新全表（空切片同样不会
+//     生成条件，也会返回错误）；
 //   - 零值字段会被跳过，无法把列更新为 0/""/nil；
 //   - filter 不是结构体时，表名仍需从 data 推导，必要时用 Option.With(ctx) 传入
 //     Table(...) 指定。

@@ -36,6 +36,7 @@ func (c *condition) add(expr string, args ...any) {
 //
 // 生成的表达式需要再传给 Builder.Where 才会生效。
 func (c *condition) E(column string, value any) {
+	column = escapeIdentifier(column)
 	if types.IsNil(value) {
 		c.add(column + " IS NULL")
 		return
@@ -54,6 +55,7 @@ func (c *condition) E(column string, value any) {
 // 注意：类型化的 nil 指针（如 (*int)(nil)）不会命中 nil 分支，会被当作参数传入，
 // 结果通常不符合预期。
 func (c *condition) NE(column string, value any) {
+	column = escapeIdentifier(column)
 	if types.IsNil(value) {
 		c.add(column + " IS NOT NULL")
 		return
@@ -71,22 +73,22 @@ func (c *condition) NE(column string, value any) {
 //
 // 注意：value 为 nil 时生成的是 "column > NULL"，永远不成立。
 func (c *condition) GreaterThan(column string, value any) {
-	c.add(column+" > ?", value)
+	c.add(escapeIdentifier(column)+" > ?", value)
 }
 
 // GreaterEqualThan 生成 "column >= ?" 条件。
 func (c *condition) GreaterEqualThan(column string, value any) {
-	c.add(column+" >= ?", value)
+	c.add(escapeIdentifier(column)+" >= ?", value)
 }
 
 // LessThan 生成 "column < ?" 条件。
 func (c *condition) LessThan(column string, value any) {
-	c.add(column+" < ?", value)
+	c.add(escapeIdentifier(column)+" < ?", value)
 }
 
 // LessEqualThan 生成 "column <= ?" 条件。
 func (c *condition) LessEqualThan(column string, value any) {
-	c.add(column+" <= ?", value)
+	c.add(escapeIdentifier(column)+" <= ?", value)
 }
 
 // In 生成 "column IN (?, ?, ...)" 条件。
@@ -96,7 +98,7 @@ func (c *condition) In(column string, values ...any) {
 	if len(values) == 0 {
 		return
 	}
-	c.add(column+" IN ("+placeholders(len(values))+")", values...)
+	c.add(escapeIdentifier(column)+" IN ("+placeholders(len(values))+")", values...)
 }
 
 // NotIn 生成 "column NOT IN (?, ?, ...)" 条件。
@@ -106,24 +108,24 @@ func (c *condition) NotIn(column string, values ...any) {
 	if len(values) == 0 {
 		return
 	}
-	c.add(column+" NOT IN ("+placeholders(len(values))+")", values...)
+	c.add(escapeIdentifier(column)+" NOT IN ("+placeholders(len(values))+")", values...)
 }
 
 // IsNull 生成 "column IS NULL" 条件。
 func (c *condition) IsNull(column string) {
-	c.add(column + " IS NULL")
+	c.add(escapeIdentifier(column) + " IS NULL")
 }
 
 // Like 生成 "column LIKE ?" 条件。
 //
 // value 必须自带通配符（如 "%abc%"）；方法不会转义 % 和 _，也不会自动添加 %。
 func (c *condition) Like(column string, value any) {
-	c.add(column+" LIKE ?", value)
+	c.add(escapeIdentifier(column)+" LIKE ?", value)
 }
 
 // NotLike 生成 "column NOT LIKE ?" 条件，通配符规则同 Like。
 func (c *condition) NotLike(column string, value any) {
-	c.add(column+" NOT LIKE ?", value)
+	c.add(escapeIdentifier(column)+" NOT LIKE ?", value)
 }
 
 func placeholders(n int) string {
@@ -132,10 +134,42 @@ func placeholders(n int) string {
 
 // Escape 用反引号包裹标识符，适用于 MySQL。
 //
-// 内部的 "`" 会被转义为 "“"。注意：Escape 只处理标识符，不处理值；值请始终使用
+// 内部的 "`" 会被转义为 "``"。注意：Escape 只处理标识符，不处理值；值请始终使用
 // 占位符参数。
 func Escape(identifier string) string {
 	return "`" + strings.ReplaceAll(identifier, "`", "``") + "`"
+}
+
+// escapeIdentifier 转义列名/表名，并支持 "schema.table" 形式的限定标识符。
+func escapeIdentifier(identifier string) string {
+	if identifier == "" {
+		return ""
+	}
+	parts := strings.Split(identifier, ".")
+	for i := range parts {
+		parts[i] = Escape(parts[i])
+	}
+	return strings.Join(parts, ".")
+}
+
+// escapeIdentifiers 批量转义标识符，空字符串会被跳过。
+func escapeIdentifiers(identifiers []string) []string {
+	escaped := make([]string, 0, len(identifiers))
+	for _, identifier := range identifiers {
+		if identifier == "" {
+			continue
+		}
+		escaped = append(escaped, escapeIdentifier(identifier))
+	}
+	return escaped
+}
+
+// baseIdentifier 返回限定标识符的最后一段，用于生成列别名。
+func baseIdentifier(identifier string) string {
+	if i := strings.LastIndex(identifier, "."); i >= 0 {
+		return identifier[i+1:]
+	}
+	return identifier
 }
 
 // Raw 表示一段原样拼入 SQL 的片段。
@@ -170,8 +204,26 @@ func (b *SelectBuilder) From(table string) *SelectBuilder {
 }
 
 // Select 设置查询列，会覆盖之前的设置；不调用时默认为 "*"。
+//
+// 只能传入列标识符，列名会自动转义；不要传入完整的 SQL 表达式。
 func (b *SelectBuilder) Select(cols ...string) *SelectBuilder {
-	b.cols = append([]string{}, cols...)
+	b.cols = make([]string, 0, len(cols))
+	for _, col := range cols {
+		if col == "" {
+			continue
+		}
+		if col == "*" {
+			b.cols = append(b.cols, col)
+			continue
+		}
+		b.cols = append(b.cols, escapeIdentifier(col))
+	}
+	return b
+}
+
+// selectExpr 设置查询表达式，不做标识符转义，仅用于包内生成 COUNT/DISTINCT 等表达式。
+func (b *SelectBuilder) selectExpr(exprs ...string) *SelectBuilder {
+	b.cols = append([]string{}, exprs...)
 	return b
 }
 
@@ -183,25 +235,40 @@ func (b *SelectBuilder) Where(exprs ...string) *SelectBuilder {
 	return b
 }
 
-// GroupBy 设置 GROUP BY 列，会覆盖之前的设置。
+// GroupBy 设置 GROUP BY 列，会覆盖之前的设置；列名会自动转义。
 func (b *SelectBuilder) GroupBy(cols ...string) *SelectBuilder {
+	b.groupBy = make([]string, 0, len(cols))
 	for _, col := range cols {
-		b.groupBy = append([]string{}, Escape(col))
+		if col == "" {
+			continue
+		}
+		b.groupBy = append(b.groupBy, escapeIdentifier(col))
 	}
 	return b
 }
 
-// OrderBy 设置 ORDER BY 子句，会覆盖之前的设置；列名和方向都原样拼接。
+// OrderBy 设置 ORDER BY 子句，会覆盖之前的设置。
+//
+// 列名以 "-" 开头表示降序，如 "-created_at"；列名会自动转义。
 func (b *SelectBuilder) OrderBy(cols ...string) *SelectBuilder {
+	b.orderBy = make([]string, 0, len(cols))
 	for _, col := range cols {
-		if col == "" || col == "-" {
+		if col == "" {
 			continue
 		}
-		if col[0] == '-' {
-			b.orderBy = append([]string{}, Escape(strings.TrimLeft(col, "-"))+" DESC")
-		} else {
-			b.orderBy = append([]string{}, Escape(col))
+		desc := false
+		if strings.HasPrefix(col, "-") {
+			desc = true
+			col = strings.TrimPrefix(col, "-")
 		}
+		if col == "" {
+			continue
+		}
+		expr := escapeIdentifier(col)
+		if desc {
+			expr += " DESC"
+		}
+		b.orderBy = append(b.orderBy, expr)
 	}
 	return b
 }
@@ -226,7 +293,7 @@ func (b *SelectBuilder) Build() (string, []any) {
 	if len(b.cols) > 0 {
 		cols = strings.Join(b.cols, ", ")
 	}
-	statement := "SELECT " + cols + " FROM " + b.table
+	statement := "SELECT " + cols + " FROM " + escapeIdentifier(b.table)
 	if len(b.where) > 0 {
 		statement += " WHERE " + strings.Join(b.where, " AND ")
 	}
@@ -282,9 +349,9 @@ func (b *InsertBuilder) ReplaceInto(table string) *InsertBuilder {
 	return b
 }
 
-// Cols 设置列名，会覆盖之前的设置。
+// Cols 设置列名，会覆盖之前的设置；列名会自动转义。
 func (b *InsertBuilder) Cols(cols ...string) *InsertBuilder {
-	b.cols = append([]string{}, cols...)
+	b.cols = escapeIdentifiers(cols)
 	return b
 }
 
@@ -320,7 +387,7 @@ func (b *InsertBuilder) Build() (string, []any) {
 			lines = append(lines, "("+placeholders(len(row))+")")
 		}
 	}
-	statement := mode + " " + b.table
+	statement := mode + " " + escapeIdentifier(b.table)
 	if len(b.cols) > 0 {
 		statement += " (" + strings.Join(b.cols, ", ") + ")"
 	}
@@ -377,16 +444,18 @@ func (b *UpdateBuilder) Where(exprs ...string) *UpdateBuilder {
 // Assign 生成 "column = ?" 表达式并把 value 收集为参数，返回值需传给 SetMore。
 func (b *UpdateBuilder) Assign(column string, value any) string {
 	b.setArgs = append(b.setArgs, value)
-	return column + " = ?"
+	return escapeIdentifier(column) + " = ?"
 }
 
 // Incr 生成 "column = column + 1" 表达式，返回值需传给 SetMore。
 func (b *UpdateBuilder) Incr(column string) string {
+	column = escapeIdentifier(column)
 	return column + " = " + column + " + 1"
 }
 
 // Decr 生成 "column = column - 1" 表达式，返回值需传给 SetMore。
 func (b *UpdateBuilder) Decr(column string) string {
+	column = escapeIdentifier(column)
 	return column + " = " + column + " - 1"
 }
 
@@ -394,16 +463,19 @@ func (b *UpdateBuilder) Decr(column string) string {
 //
 // 注意：value 通过 fmt.Sprintf 直接拼入 SQL，而不是占位符参数，因此只能传入可信数值。
 func (b *UpdateBuilder) Add(column string, value float64) string {
+	column = escapeIdentifier(column)
 	return fmt.Sprintf("%s = %s + %v", column, column, value)
 }
 
 // Sub 生成 "column = column - value" 表达式，value 的拼接规则同 Add。
 func (b *UpdateBuilder) Sub(column string, value float64) string {
+	column = escapeIdentifier(column)
 	return fmt.Sprintf("%s = %s - %v", column, column, value)
 }
 
 // Mul 生成 "column = column * value" 表达式，value 的拼接规则同 Add。
 func (b *UpdateBuilder) Mul(column string, value float64) string {
+	column = escapeIdentifier(column)
 	return fmt.Sprintf("%s = %s * %v", column, column, value)
 }
 
@@ -411,6 +483,7 @@ func (b *UpdateBuilder) Mul(column string, value float64) string {
 //
 // 坑：value 为 0 时依赖数据库行为（MySQL 返回 NULL，严格模式可能报错）。
 func (b *UpdateBuilder) Div(column string, value float64) string {
+	column = escapeIdentifier(column)
 	return fmt.Sprintf("%s = %s / %v", column, column, value)
 }
 
@@ -419,7 +492,7 @@ func (b *UpdateBuilder) Div(column string, value float64) string {
 // 坑：sets 为空时会生成 "UPDATE table SET "，属于非法 SQL；调用方需保证至少设置
 // 一个 SET 表达式。
 func (b *UpdateBuilder) Build() (string, []any) {
-	statement := "UPDATE " + b.table + " SET " + strings.Join(b.sets, ", ")
+	statement := "UPDATE " + escapeIdentifier(b.table) + " SET " + strings.Join(b.sets, ", ")
 	if len(b.where) > 0 {
 		statement += " WHERE " + strings.Join(b.where, " AND ")
 	}
@@ -456,7 +529,7 @@ func (b *DeleteBuilder) Where(exprs ...string) *DeleteBuilder {
 
 // Build 返回 DELETE 语句和 WHERE 参数。
 func (b *DeleteBuilder) Build() (string, []any) {
-	statement := "DELETE FROM " + b.table
+	statement := "DELETE FROM " + escapeIdentifier(b.table)
 	if len(b.where) > 0 {
 		statement += " WHERE " + strings.Join(b.where, " AND ")
 	}

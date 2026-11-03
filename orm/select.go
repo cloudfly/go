@@ -112,7 +112,7 @@ func GetWhere(ctx context.Context, dst any, filter any) error {
 //
 // 坑：
 //   - 查询不到的“数据”不会报错，dst 为空切片；只有 SQL/扫描失败才返回错误；
-//   - Sorts 中的列名原样拼接，不做校验，请勿传入未受信任的字符串；
+//   - Sorts 中的列名会自动转义为标识符，只能传列名，不能传表达式；
 //   - 表名默认从 dst 推导，filter 不是结构体时可用 Option.With(ctx) 传入
 //     Table(...) 指定。
 func SelectWhere(ctx context.Context, dst any, filter any) error {
@@ -151,7 +151,7 @@ func Count(ctx context.Context, filter any) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	b := NewSelectBuilder().Select("COUNT(1) as total").From(table)
+	b := NewSelectBuilder().selectExpr("COUNT(1) as total").From(table)
 	WhereFrom(ctx, &b.condition, filter)
 	b = b.Where(b.condition.exprs...)
 
@@ -176,13 +176,13 @@ func Count(ctx context.Context, filter any) (int64, error) {
 func CountBy(ctx context.Context, dst any, filter any, group []string) error {
 	cols := []string{"COUNT(1) as _total"}
 	if len(group) > 0 {
-		cols = append(cols, group...)
+		cols = append(cols, escapeIdentifiers(group)...)
 	}
 	table, err := TableName(ctx, filter)
 	if err != nil {
 		return err
 	}
-	b := NewSelectBuilder().Select(cols...).From(table)
+	b := NewSelectBuilder().selectExpr(cols...).From(table)
 	WhereFrom(ctx, &b.condition, filter)
 	b = b.Where(b.condition.exprs...)
 
@@ -212,7 +212,7 @@ func Distinct(ctx context.Context, column string, filter any) ([]any, error) {
 		return nil, err
 	}
 	builder := NewSelectBuilder().From(table)
-	builder = builder.Select(fmt.Sprintf("DISTINCT(%s) as %s", Escape(column), Escape(column)))
+	builder = builder.selectExpr(fmt.Sprintf("DISTINCT(%s) as %s", escapeIdentifier(column), Escape(baseIdentifier(column))))
 	WhereFrom(ctx, &builder.condition, filter)
 	builder = builder.Where(builder.condition.exprs...)
 	sql, args := builder.Build()
@@ -237,7 +237,7 @@ func Exist(ctx context.Context, filter any) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	b := NewSelectBuilder().Select("1").From(table).Limit(1)
+	b := NewSelectBuilder().selectExpr("1").From(table).Limit(1)
 	WhereFrom(ctx, &b.condition, filter)
 	b = b.Where(b.condition.exprs...)
 
