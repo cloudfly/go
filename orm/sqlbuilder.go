@@ -221,6 +221,14 @@ func (b *SelectBuilder) Select(cols ...string) *SelectBuilder {
 	return b
 }
 
+// SelectRaw 设置查询表达式，不做标识符转义，仅用于包内生成 COUNT/DISTINCT 等表达式。
+func (b *SelectBuilder) SelectRaw(exprs ...Raw) *SelectBuilder {
+	for _, expr := range exprs {
+		b.cols = append(b.cols, string(expr))
+	}
+	return b
+}
+
 // selectExpr 设置查询表达式，不做标识符转义，仅用于包内生成 COUNT/DISTINCT 等表达式。
 func (b *SelectBuilder) selectExpr(exprs ...string) *SelectBuilder {
 	b.cols = append([]string{}, exprs...)

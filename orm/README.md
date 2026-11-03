@@ -1,11 +1,14 @@
 # orm
 
 `orm` 是一个基于 `database/sql` 的轻量 MySQL ORM，提供结构体与表之间的增删改查、事务、
-表锁和可选缓存能力。包名为 `orm`，导入路径为 `github.com/cloudfly/go/orm`。
+表锁和可选缓存能力。
 
-```go
-import orm "github.com/cloudfly/go/orm"
-```
+该 orm 的设计理念是通过明确定义的 structure 来管理数据，以用户数据为例，我们应该明确以下数据结构：
+1. User: 代表用户数据，使用 `Select`, `Get` 来填充 `[]User` 或 `User`。
+2. UserFilter: 代表用户查询条件，专门用于 `GetWhere`, `SelectWhere` 过滤数据。
+3. UserPatch: 代表用户更新数据，专门用于通过 `PatchByID`, `PatchWhere` 更新数据。
+
+其中 XXXFilter 和 XXXPatch 都是定义明确的 structure，其内部字段均应该使用**指针类型**。 当字段值为 nil 时候，则会再 `Where` 和 `Update` 中被忽略；非 `nil` 场景即便字段值为零值，也会被考虑在内 如 `age = 0` 或 `phone = ''`。
 
 ## 快速开始
 
@@ -17,11 +20,31 @@ type User struct {
 	Name      string         `db:"name,insert"`
 	Age       int            `db:"age,insert"`
 	Status    int            `db:"status,insert"`
-	CreatedAt orm.Timestamp `db:"created_at,insert,type:timestamp"`
+	CreatedAt time.Time      `db:"created_at,insert"`
 }
 
 // 可选：实现 Table() 指定表名；不实现时默认使用结构体名的 snake_case（User -> user）。
 func (*User) Table() string { return "users" }
+
+type UserFilter struct {
+	ID        *int64          `db:"id"`
+	Name      *string         `db:"name",op:"like"`
+	AgeGt     *int            `db:"age",op:"gt"`
+	AgeLt     *int            `db:"age",op:"lt"`
+	Status    []int            `db:"status",opt:"in"`
+	NotStatus    []int            `db:"status",opt:"notin"`
+}
+
+func (*UserFilter) Table() string { return "users" }
+
+type UserPatch struct {
+	Name      *string         `db:"name"`
+	Age       *int            `db:"age"`
+	Status    *int            `db:"status"`
+}
+
+func (*UserPatch) Table() string { return "users" }
+
 ```
 
 ### 2. 初始化
@@ -32,25 +55,16 @@ func (*User) Table() string { return "users" }
 var master, slave *sql.DB
 
 orm.SetGlobalOption(
-	(&orm.Option{}).
-		DBProvider(func(isMaster bool) *sql.DB {
+	&orm.Option{
+		DBProvider: func(isMaster bool) *sql.DB {
 			if isMaster {
 				return master
 			}
 			return slave
-		}),
+		},
+	}
 )
 ```
-
-也可以不设置全局配置，而是把自定义 Option 放入 context：
-
-```go
-ctx = orm.Opt(ctx).DBProvider(provider).With(ctx)
-```
-
-> 所有查询/构建函数只接收 `context.Context` 作为配置来源，内部通过 `Opt(ctx)` 读取
-> Option。需要自定义 Option 时，用 `Option.With(ctx)` 把它放进 context；读不到时
-> 使用全局配置。
 
 ### 3. 增删改查
 
@@ -64,36 +78,36 @@ err = orm.GetByID(ctx, &u, int64(1))
 if orm.IsNotFound(err) { /* 不存在 */ }
 
 // 条件查询单行
-err = orm.GetWhere(ctx, &u, orm.KVs{{Key: "name", Value: "tom"}})
+name := "tom"
+err = orm.GetWhere(ctx, &u, UserFilter{Name: &name})
 
 // 条件查询列表 + 排序 + 分页
 var list []User
 ctx = orm.Opt(ctx).Sorts("-id").Page(1, 20).With(ctx)
-err = orm.SelectWhere(ctx, &list, orm.KVs{{Key: "status", Value: 1}})
+err = orm.SelectWhere(ctx, &list, UserFilter{Status: []int{1}})
 
 // 按主键更新非零字段
-err = orm.PatchByID(ctx, int64(1), &User{Name: "jerry"})
+err = orm.PatchByID(ctx, int64(1), &UserPatch{Name: orm.Ptr("jerry")})
 
 // 条件更新，返回受影响行数
-n, err := orm.PatchWhere(ctx, &User{Status: 2}, orm.KVs{{Key: "age", Value: 18}})
+n, err := orm.PatchWhere(ctx, &UserPatch{Status: orm.Ptr(2)}, UserFilter{AgeGt: orm.Ptr(18)})
 
 // 按主键删除（必须显式指定表名）
-ctx = orm.Opt(ctx).Table("users").With(ctx)
-err = orm.DeleteByID(ctx, int64(1))
+err = orm.DeleteByID(orm.Opt(ctx).Table("users").With(ctx), int64(1))
 
 // 条件删除（KVs 无法推导表名，必须显式指定表）
-err = orm.DeleteWhere(ctx, orm.KVs{{Key: "status", Value: 0}})
+err = orm.DeleteWhere(ctx, &UserFilter{Status: []int{0}})
 
 // 统计与存在性判断
 total, err := orm.Count(ctx, &User{})
-ok, err := orm.Exist(ctx, orm.KVs{{Key: "name", Value: "tom"}})
+ok, err := orm.Exist(ctx, &UserFilter{Name: orm.Ptr("tom")})
 ```
 
 批量插入：
 
 ```go
 err = orm.InsertMany(ctx, []any{&User{Name: "a"}, &User{Name: "b"}})
-err = orm.InsertIgnore(ctx, []any{&User{ID: 1, Name: "a"}}) // 冲突行忽略
+err = orm.InsertIgnore(ctx, []any{&User{Name: "a"}}) // 冲突行忽略
 ```
 
 ## 结构体 tag
@@ -109,46 +123,37 @@ err = orm.InsertIgnore(ctx, []any{&User{ID: 1, Name: "a"}}) // 冲突行忽略
 | `db:",select:-"` | 查询时排除该列（也支持 `select:false`） |
 | `db:",incr"` / `decr` | 更新时生成 `col = col ± 1` |
 | `db:",add:1.5"` / `sub` / `mul` / `div` | 更新时生成加减乘除常量表达式 |
-| `db:"created_at,type:timestamp"` | 写入/过滤前把值转换为时间 |
 | `op:"in"` 等 | 单独的条件操作符 tag，用于结构体过滤 |
 
 `op` 支持：`e/eq/equal`、`ne/neq`、`gt`、`gte`、`lt`、`lte`、`in`、`notin`、
 `like`、`notlike`。`like` 会自动在值两侧补 `%`。
 
-> 表名规则与列名规则不同：结构体名转表名使用 snake_case（`UserProfile` -> `user_profile`），
-> 而字段名默认只做小写（`UserID` -> `userid`）。需要下划线列名时请显式写 `db:"user_id"`。
 
 ## 过滤条件
 
-`filter` 支持四种形式（见 `WhereFrom`）：
+`filter` 支持五种形式：
 
 ```go
 // 1. struct：非零字段生成 AND 条件，字段可用 op tag 指定操作符
-orm.KVs{} // 不适用
 &User{Name: "tom"} // name = 'tom'
 
-// 2. KVs：可表达零值和任意操作符
+// 2. KV：单条 AND 条件
+orm.KV{Key: "name", Value: "tom"} // name = 'tom'
+
+// 3. KVs：可表达零值和任意操作符
 orm.KVs{
 	{Key: "status", Value: 0, Extra: "e"},
 	{Key: "age", Value: []int{18, 19}, Extra: "in"},
 }
 
-// 3. map：由 KVsFromMap 自动选择操作符
+// 4. map：由 KVsFromMap 自动选择操作符
 orm.KVsFromMap(nil, map[string]any{"status": 0, "id": []int64{1, 2}})
 
-// 4. 单值 / 切片：按主键过滤
+// 5. 单值 / 切片：按主键过滤
 int64(1)          // id = 1
 []int64{1, 2, 3}  // id IN (1, 2, 3)
 ```
 
-> **坑**：结构体过滤会跳过零值字段，无法表达 `status = 0`；这种情况请使用 `KVs`。
-> `filter` 为 `nil` 或零值结构体时不会生成条件：`DeleteWhere`/`PatchWhere` 会返回错误以
-> 保护数据，而 `Count`/`Exist` 会把它当作全表统计/判断。
-
-> **坑**：`KVs`、`map`、单值无法正确推导表名（`KVs` 会被推导成 `"kv"`，`map`/单值通常
-> 直接报错）。`DeleteWhere`/`Count`/`CountBy`/`Distinct`/`Exist` 使用这些 filter 时，必须
-> 用 `orm.Opt(ctx).Table("users").With(ctx)` 显式指定表名。`GetWhere`/`SelectWhere`/
-> `PatchWhere` 从目标结构体或 data 推导表名，一般不受影响。
 
 ## 事务
 
@@ -157,8 +162,7 @@ err := orm.RunTx(ctx, func(ctx context.Context) error {
 	if _, err := orm.InsertOne(ctx, &User{Name: "tom"}); err != nil {
 		return err
 	}
-	return orm.PatchWhere(ctx, &User{Status: 1},
-		orm.KVs{{Key: "name", Value: "tom"}})
+	return orm.PatchWhere(ctx, &UserPatch{Status: orm.Ptr(1)}, orm.KVs{{Key: "name", Value: "tom"}})
 })
 ```
 
@@ -190,9 +194,7 @@ type CacheProvider interface {
 	RemoveAll(table string)
 }
 
-opt := orm.Opt(ctx).
-	DBProvider(provider).
-	CacheProvider(myCache) // 传 nil 关闭缓存
+opt := orm.Opt(ctx).CacheProvider(myCache) // 传 nil 关闭缓存
 ```
 
 - 缓存内容是目标结构体的 JSON 表示；反序列化失败会静默回退到数据库。
@@ -203,7 +205,7 @@ opt := orm.Opt(ctx).
 ## 主从与一致性
 
 - 写操作始终走主库。
-- 读操作默认走从库；需要读最新数据时使用 `opt.FromMaster()`。
+- 读操作默认走从库；延时敏感场景需要读最新数据时使用 `opt.FromMaster()`。
 - 连接优先级：事务 > 表锁固定连接 > 连接池。
 - 主从延迟敏感的业务，建议写后读显式使用主库，或直接放在同一事务中。
 
@@ -231,31 +233,10 @@ sql, args := b.Build()
 
 ```go
 // 原始 SQL 中的切片参数展开（类似 sqlx.In）
-query, args, err := orm.In("SELECT * FROM users WHERE id IN (?)", []int64{1, 2, 3})
+query, args, err := orm.In(orm.Raw("SELECT * FROM users WHERE id IN (?)"), []int64{1, 2, 3})
 ```
 
-> **坑**：`Raw` 类型和 `UpdateBuilder.Add/Sub/Mul/Div` 会把内容直接拼进 SQL，不经过参数
-> 转义；只能传入可信常量，严禁拼接用户输入。
-
-## 结果扫描
-
-`Select`/`Get` 会把结果列名与结构体字段匹配：
-
-- 有 tag 时按 tag 的列名匹配；
-- 无 tag 时按字段名小写匹配；
-- `db:"-"` 的字段不参与扫描；
-- 匿名嵌入结构体默认展开，也可用 `db:",inline"` 显式展开；
-- **结果集的每一列都必须能匹配到字段**，否则返回 `missing destination name` 错误。
-
-查询不到数据时 `Get` 返回 `sql.ErrNoRows`，用 `orm.IsNotFound(err)` 判断。
-
-## 时间类型
-
-`orm.Timestamp` 同时实现 `sql.Scanner`、`driver.Valuer` 和 JSON 编解码：
-
-- 数据库读写：转换为 `time.Time`；
-- JSON：序列化为 Unix 秒数（数字），反序列化也接受 Unix 秒数；
-- 数据库字符串格式：`2006-01-02 15:04:05`，支持小数秒。
+- 自定义 SQL表达式时，调用者需要自行处理 SQL 注入风险。
 
 ## 错误判断
 
@@ -263,27 +244,3 @@ query, args, err := orm.In("SELECT * FROM users WHERE id IN (?)", []int64{1, 2, 
 orm.IsNotFound(err)  // sql.ErrNoRows
 orm.IsDuplicate(err) // MySQL Error 1062 Duplicate entry
 ```
-
-## 常见坑速查
-
-1. `DBProvider` 未设置时，所有 SQL 执行都会返回 `orm: DBProvider is required`。
-2. `Option{}` 不要在外部直接构造；用 `orm.Opt(ctx)` 获取继承全局配置的副本，再用
-   `Option.With(ctx)` 传入。
-3. `Option` 的链式方法会原地修改对象；跨 goroutine 复用前先 `Copy()`。
-4. 结构体过滤跳过零值字段，过滤 `0`/`""` 请用 `KVs`。
-5. 更新只会写入非零字段，无法把列更新为 `0`/`""`/`nil`；`incr`/`decr` 也要求字段本身是
-   非零占位值（通常填 `1`），否则该字段会被跳过。
-6. 插入字段必须声明 `db:",insert"`，否则不会被写入；完全没有 insert 字段会报错。
-7. 完全为零值的结构体行在批量插入时会被跳过。
-8. `DeleteByID` 没有结构体参数，必须通过 `Option.With(ctx)` 传入带 `Table(...)` 的 Option
-   来指定表名。
-9. `DeleteWhere`/`PatchWhere` 的 `filter` 必须能生成条件，否则返回错误。
-10. `KVs`/`map`/单值 filter 无法正确推导表名（`KVs` 会得到 `"kv"`），`DeleteWhere`/
-    `Count`/`CountBy`/`Distinct`/`Exist` 需用 `Option.With(ctx)` 显式传入
-    `Table(...)`。
-11. 空切片作为过滤条件会生成 `0 = 1`，不会报错但也不会命中任何行。
-12. `SelectBuilder.Offset` 只有在 `Limit > 0` 时才生效。
-13. `orm.In` 遇到空切片会替换为 `NULL`，`IN (NULL)` 与 `NOT IN (NULL)` 都匹配不到数据。
-14. 缓存只在 `GetByID` 生效，事务中自动禁用；缓存内容是 JSON，自定义 `TagName` 不影响缓存。
-15. 表锁、事务都必须使用函数传入的 `ctx`，否则语句可能跑到其他连接上。
-16. 使用 `TagName("json")` 时，列名规则随之改变，注意与数据库列名保持一致。

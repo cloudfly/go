@@ -42,10 +42,13 @@ func whereFromStruct(ctx context.Context, c *condition, data any) {
 
 	for _, f := range structFields(t, getTagName(opt)) {
 		fv := fieldValueByIndex(v, f.Index)
-		if !fv.IsValid() || fv.IsZero() {
+		if !fv.IsValid() {
 			continue
 		}
 		fieldValue := fieldValueAny(fv)
+		if types.IsNil(fieldValue) {
+			continue
+		}
 		fieldValue = convertValueByDBType(fieldValue, f.Opts["type"])
 		appendWhereExpr(c, f.Name, fieldValue, f.Field.Tag.Get("op"))
 	}
