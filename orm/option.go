@@ -151,9 +151,7 @@ func (opt *Option) Table(value any) *Option {
 	case interface{ Table() string }:
 		name = data.Table()
 	}
-	if ValidateTableName(name) == nil {
-		opt.table = name
-	}
+	opt.table = name
 	return opt
 }
 
@@ -267,6 +265,7 @@ func (opt *Option) DBProvider(provider DBProvider) *Option {
 	return opt
 }
 
+// CacheTTL 设置 GetByID/GetWhere/SelectWhere 写入缓存时使用的过期时间。
 func (opt *Option) CacheTTL(ttl time.Duration) *Option {
 	opt.cacheTTL = ttl
 	return opt
@@ -294,5 +293,5 @@ func (opt *Option) With(ctx context.Context) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return context.WithValue(ctx, optionCtxKey{}, opt)
+	return context.WithValue(ctx, optionCtxKey{}, opt.Copy())
 }

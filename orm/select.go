@@ -50,11 +50,11 @@ func GetByID[ID comparable](ctx context.Context, dst any, id ID) error {
 	if fields := opt.fields; len(fields) > 0 {
 		b = b.Select(fields...)
 	}
-	WhereFrom(ctx, &b.condition, KV{getPrimaryKey(opt), id, "eq"})
-	if len(b.condition.exprs) == 0 {
-		return fmt.Errorf("at least one filter condition in Select SQL")
+	whereFrom(ctx, &b.cond, KV{getPrimaryKey(opt), id, "eq"})
+	if len(b.cond.exprs) == 0 {
+		return fmt.Errorf("at least one filter cond in Select SQL")
 	}
-	b = b.Where(b.condition.exprs...).Limit(1)
+	b = b.Where(b.cond.exprs...).Limit(1)
 
 	var (
 		statement string
@@ -83,7 +83,7 @@ func GetByID[ID comparable](ctx context.Context, dst any, id ID) error {
 // filter 的用法见 WhereFrom。dst 必须是结构体指针；查询不到数据时返回错误，
 // 可用 IsNotFound 判断。
 //
-// 注意：本函数只取一行，不处理 Option.Sorts 和 Option.Page；需要排序/分页的列表查询
+// 注意：本函数只取一行，不处理 Option.Page；需要排序/分页的列表查询
 // 请使用 SelectWhere。表名默认从 dst 推导，filter 不是结构体时可用
 // Option.With(ctx) 传入 Table(...) 指定。
 func GetWhere(ctx context.Context, dst any, filter any) error {
@@ -95,8 +95,8 @@ func GetWhere(ctx context.Context, dst any, filter any) error {
 	if len(opt.fields) > 0 {
 		builder = builder.Select(opt.fields...)
 	}
-	WhereFrom(ctx, &builder.condition, filter)
-	builder = builder.Where(builder.condition.exprs...).Limit(1)
+	whereFrom(ctx, &builder.cond, filter)
+	builder = builder.Where(builder.cond.exprs...).Limit(1)
 	if len(opt.sorts) > 0 {
 		builder = builder.OrderBy(opt.sorts...)
 	}
@@ -124,8 +124,8 @@ func SelectWhere(ctx context.Context, dst any, filter any) error {
 	if len(opt.fields) > 0 {
 		builder = builder.Select(opt.fields...)
 	}
-	WhereFrom(ctx, &builder.condition, filter)
-	builder = builder.Where(builder.condition.exprs...)
+	whereFrom(ctx, &builder.cond, filter)
+	builder = builder.Where(builder.cond.exprs...)
 
 	if len(opt.sorts) > 0 {
 		builder = builder.OrderBy(opt.sorts...)
@@ -152,8 +152,8 @@ func Count(ctx context.Context, filter any) (int64, error) {
 		return 0, err
 	}
 	b := NewSelectBuilder().selectExpr("COUNT(1) as total").From(table)
-	WhereFrom(ctx, &b.condition, filter)
-	b = b.Where(b.condition.exprs...)
+	whereFrom(ctx, &b.cond, filter)
+	b = b.Where(b.cond.exprs...)
 
 	sql, args := b.Build()
 
@@ -183,8 +183,8 @@ func CountBy(ctx context.Context, dst any, filter any, group []string) error {
 		return err
 	}
 	b := NewSelectBuilder().selectExpr(cols...).From(table)
-	WhereFrom(ctx, &b.condition, filter)
-	b = b.Where(b.condition.exprs...)
+	whereFrom(ctx, &b.cond, filter)
+	b = b.Where(b.cond.exprs...)
 
 	if len(group) > 0 {
 		b = b.GroupBy(group...)
@@ -213,8 +213,8 @@ func Distinct(ctx context.Context, column string, filter any) ([]any, error) {
 	}
 	builder := NewSelectBuilder().From(table)
 	builder = builder.selectExpr(fmt.Sprintf("DISTINCT(%s) as %s", escapeIdentifier(column), Escape(baseIdentifier(column))))
-	WhereFrom(ctx, &builder.condition, filter)
-	builder = builder.Where(builder.condition.exprs...)
+	whereFrom(ctx, &builder.cond, filter)
+	builder = builder.Where(builder.cond.exprs...)
 	sql, args := builder.Build()
 
 	data := []any{}
@@ -238,8 +238,8 @@ func Exist(ctx context.Context, filter any) (bool, error) {
 		return false, err
 	}
 	b := NewSelectBuilder().selectExpr("1").From(table).Limit(1)
-	WhereFrom(ctx, &b.condition, filter)
-	b = b.Where(b.condition.exprs...)
+	whereFrom(ctx, &b.cond, filter)
+	b = b.Where(b.cond.exprs...)
 
 	statement, args := b.Build()
 	err = Get(ctx, &n, statement, args...)

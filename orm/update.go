@@ -27,11 +27,11 @@ func PatchByID[ID comparable](ctx context.Context, id ID, data any) (int64, erro
 	if err != nil {
 		return 0, err
 	}
-	WhereFrom(ctx, &ub.condition, id)
-	if len(ub.condition.exprs) == 0 {
-		return 0, fmt.Errorf("at least one filter condition in Update SQL")
+	whereFrom(ctx, &ub.cond, id)
+	if len(ub.cond.exprs) == 0 {
+		return 0, fmt.Errorf("at least one filter cond in Update SQL")
 	}
-	ub = ub.Where(ub.condition.exprs...)
+	ub = ub.Where(ub.cond.exprs...)
 	var (
 		sql  string
 		args []any
@@ -67,11 +67,11 @@ func PatchWhere(ctx context.Context, data any, filter any) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	WhereFrom(ctx, &ub.condition, filter)
-	if len(ub.condition.exprs) == 0 {
-		return 0, fmt.Errorf("at least one filter condition in Update SQL")
+	whereFrom(ctx, &ub.cond, filter)
+	if len(ub.cond.exprs) == 0 {
+		return 0, fmt.Errorf("at least one filter cond in Update SQL")
 	}
-	ub = ub.Where(ub.condition.exprs...)
+	ub = ub.Where(ub.cond.exprs...)
 	var (
 		sql  string
 		args []any

@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/cloudfly/go/types"
 )
 
 // Any2Time 尝试把常见的时间表示转换为 time.Time。
@@ -121,7 +123,7 @@ func dereferencedElemType(t reflect.Type) reflect.Type {
 // data 为 nil 时返回空切片；data 不是切片时返回只含该值的单元素切片；是切片时按原顺序
 // 展开一层（不会递归展开嵌套切片）。
 func Any2Slice(data any) []any {
-	if data == nil {
+	if types.IsNil(data) {
 		return []any{}
 	}
 	v := reflect.ValueOf(data)
@@ -168,11 +170,13 @@ func KVsFromMap(dst KVs, filter map[string]any) KVs {
 		if v == nil {
 			dst = append(dst, KV{Key: k, Value: nil, Extra: "e"})
 		} else {
-			switch reflect.TypeOf(v).Kind() {
-			case reflect.Slice:
-				dst = append(dst, KV{Key: k, Value: v, Extra: "in"})
-			default:
+			kind := reflect.TypeOf(v).Kind()
+			if kind != reflect.Slice {
 				dst = append(dst, KV{Key: k, Value: v, Extra: "e"})
+			} else if d, ok := v.([]byte); ok {
+				dst = append(dst, KV{Key: k, Value: string(d), Extra: "e"})
+			} else {
+				dst = append(dst, KV{Key: k, Value: v, Extra: "in"})
 			}
 		}
 	}
@@ -195,4 +199,8 @@ func IsDuplicate(err error) bool {
 	}
 	es := err.Error()
 	return strings.Contains(es, "Error 1062") && strings.Contains(es, "Duplicate entry")
+}
+
+func Ptr[T any](v T) *T {
+	return &v
 }

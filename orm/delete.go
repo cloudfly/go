@@ -22,11 +22,11 @@ func DeleteWhere(ctx context.Context, filter any) error {
 		return err
 	}
 	builder := NewDeleteBuilder().DeleteFrom(table)
-	WhereFrom(ctx, &builder.condition, filter)
-	if len(builder.condition.exprs) == 0 {
-		return fmt.Errorf("at least one filter condition in Delete SQL")
+	whereFrom(ctx, &builder.cond, filter)
+	if len(builder.cond.exprs) == 0 {
+		return fmt.Errorf("at least one filter cond in Delete SQL")
 	}
-	builder = builder.Where(builder.condition.exprs...)
+	builder = builder.Where(builder.cond.exprs...)
 	sql, args := builder.Build()
 	_, err = Exec(ctx, sql, args...)
 
@@ -49,11 +49,11 @@ func DeleteByID[ID comparable](ctx context.Context, id ID) error {
 		return err
 	}
 	builder := NewDeleteBuilder().DeleteFrom(table)
-	WhereFrom(ctx, &builder.condition, id)
-	if len(builder.condition.exprs) == 0 {
-		return fmt.Errorf("at least one filter condition in Delete SQL")
+	whereFrom(ctx, &builder.cond, id)
+	if len(builder.cond.exprs) == 0 {
+		return fmt.Errorf("at least one filter cond in Delete SQL")
 	}
-	builder = builder.Where(builder.condition.exprs...)
+	builder = builder.Where(builder.cond.exprs...)
 	sql, args := builder.Build()
 	_, err = Exec(ctx, sql, args...)
 

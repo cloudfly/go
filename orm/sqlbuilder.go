@@ -12,8 +12,8 @@ import (
 // condition 的方法（E/NE/In/...）只返回表达式字符串，同时把参数收集到内部。调用方必须把
 // 返回的表达式传给对应 Builder 的 Where 方法，SQL 与参数才会真正生成：
 //
-//	cond := &b.condition
-//	expr := cond.E("id", 1)
+//	condition := &b.condition
+//	expr := condition.E("id", 1)
 //	b = b.Where(expr)
 //	sql, args := b.Build() // args 中包含 1
 //
@@ -134,7 +134,7 @@ func placeholders(n int) string {
 
 // Escape 用反引号包裹标识符，适用于 MySQL。
 //
-// 内部的 "`" 会被转义为 "``"。注意：Escape 只处理标识符，不处理值；值请始终使用
+// 内部的 "`" 会被转义为 "“"。注意：Escape 只处理标识符，不处理值；值请始终使用
 // 占位符参数。
 func Escape(identifier string) string {
 	return "`" + strings.ReplaceAll(identifier, "`", "``") + "`"
@@ -182,7 +182,7 @@ type Raw string
 //
 // 链式方法都会原地修改并返回自身。Where 是追加语义，Select/GroupBy/OrderBy 是覆盖语义。
 type SelectBuilder struct {
-	condition
+	cond    condition
 	table   string
 	cols    []string
 	where   []string
@@ -309,7 +309,7 @@ func (b *SelectBuilder) Build() (string, []any) {
 			statement += fmt.Sprintf(" OFFSET %d", b.offset)
 		}
 	}
-	return statement, b.condition.args
+	return statement, b.cond.args
 }
 
 // InsertBuilder 构建 INSERT/INSERT IGNORE/REPLACE 语句。
@@ -405,7 +405,7 @@ func (b *InsertBuilder) Build() (string, []any) {
 // SET 子句通过 SetMore 添加；Assign/Incr/Decr/Add/Sub/Mul/Div 会返回可传给 SetMore 的
 // 表达式字符串。
 type UpdateBuilder struct {
-	condition
+	cond    condition
 	table   string
 	sets    []string
 	setArgs []any
@@ -496,13 +496,13 @@ func (b *UpdateBuilder) Build() (string, []any) {
 	if len(b.where) > 0 {
 		statement += " WHERE " + strings.Join(b.where, " AND ")
 	}
-	args := append(append([]any{}, b.setArgs...), b.condition.args...)
+	args := append(append([]any{}, b.setArgs...), b.cond.args...)
 	return statement, args
 }
 
 // DeleteBuilder 构建 DELETE 语句。
 type DeleteBuilder struct {
-	condition
+	cond  condition
 	table string
 	where []string
 }
@@ -533,5 +533,5 @@ func (b *DeleteBuilder) Build() (string, []any) {
 	if len(b.where) > 0 {
 		statement += " WHERE " + strings.Join(b.where, " AND ")
 	}
-	return statement, append([]any{}, b.condition.args...)
+	return statement, append([]any{}, b.cond.args...)
 }

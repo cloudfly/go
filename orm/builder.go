@@ -66,7 +66,7 @@ func whereFromKVs(c *condition, filter KVs) {
 	}
 }
 
-// WhereFrom 根据 filter 生成 WHERE 表达式，并追加到 dst 后返回。
+// whereFrom 根据 filter 生成 WHERE 表达式，并追加到 dst 后返回。
 //
 // filter 支持以下形式：
 //   - KVs：按 KV.Extra 指定的操作符生成条件；
@@ -75,7 +75,7 @@ func whereFromKVs(c *condition, filter KVs) {
 //   - slice：转换为主键 IN (...)；
 //   - 其他单值：转换为主键 = ?。
 //   - 如果 filter 中出现了非法 column，会忽略该条件。
-func WhereFrom(ctx context.Context, c *condition, filter any) {
+func whereFrom(ctx context.Context, c *condition, filter any) {
 	opt := Opt(ctx)
 	if filter == nil {
 		return
