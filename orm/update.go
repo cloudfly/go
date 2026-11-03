@@ -92,7 +92,7 @@ func PatchWhere(ctx context.Context, data any, filter any, opts ...*Option) (int
 // NewUpdateBuilderFromStruct 根据结构体的非零字段创建 UPDATE 构建器。
 //
 // 第二个返回值 ok 表示是否生成了 SET 条件：data 为 nil 或非结构体时返回
-// (nil, false, nil)，调用方通常应直接跳过执行。
+// (nil, false, nil)，调用方通常应直接跳过执行。匿名嵌入结构体会与扫描一致地展开。
 //
 // 字段 tag 选项：
 //   - `db:",incr"` / `db:",decr"`：生成自增/自减 1（字段值本身不参与 SQL）；
@@ -102,7 +102,7 @@ func PatchWhere(ctx context.Context, data any, filter any, opts ...*Option) (int
 // 坑：
 //   - 零值字段会先被跳过，因此 incr/decr/add 等选项要求字段本身是非零占位值（通常填 1），
 //     否则整个字段不会进入 SET；
-//   - add/sub/mul/div 的值直接格式化进 SQL，非法数值会被静默忽略；
+//   - add/sub/mul/div 的值直接格式化进 SQL，非法数值会返回错误；
 //   - 若所有字段都是零值，返回的 builder 没有 SET 内容，执行会得到非法 SQL。
 func NewUpdateBuilderFromStruct(data any, opts ...*Option) (*UpdateBuilder, bool, error) {
 	if data == nil {
@@ -114,12 +114,66 @@ func NewUpdateBuilderFromStruct(data any, opts ...*Option) (*UpdateBuilder, bool
 		return nil, false, err
 	}
 	ub := NewUpdateBuilder().Update(table)
+
 	v := dereferencedValue(reflect.ValueOf(data))
-	t := dereferencedType(reflect.TypeOf(data))
+	if !v.IsValid() {
+		return nil, false, nil
+	}
+
+	t := v.Type()
 	if t.Kind() != reflect.Struct {
 		return nil, false, nil
 	}
+
 	assigned := false
+
+	for _, f := range structFields(t, getTagName(opt)) {
+		field := fieldValueByIndex(v, f.Index)
+		if !field.IsValid() || field.IsZero() {
+			continue
+		}
+
+		fieldValue := convertValueByDBType(fieldValueAny(field), f.Opts["type"])
+		_, hasIncr := f.Opts["incr"]
+		_, hasDecr := f.Opts["decr"]
+		switch {
+		case hasIncr:
+			ub = ub.SetMore(ub.Incr(f.Name))
+		case hasDecr:
+			ub = ub.SetMore(ub.Decr(f.Name))
+		case f.Opts["add"] != "":
+			if fv, err := floats.Float64(f.Opts["add"]); err == nil {
+				ub = ub.SetMore(ub.Add(f.Name, fv))
+			} else {
+				return nil, false, fmt.Errorf("invalid add value: %v", f.Opts["add"])
+			}
+		case f.Opts["sub"] != "":
+			if fv, err := floats.Float64(f.Opts["sub"]); err == nil {
+				ub = ub.SetMore(ub.Sub(f.Name, fv))
+			} else {
+				return nil, false, fmt.Errorf("invalid sub value: %v", f.Opts["sub"])
+			}
+		case f.Opts["mul"] != "":
+			if fv, err := floats.Float64(f.Opts["mul"]); err == nil {
+				ub = ub.SetMore(ub.Mul(f.Name, fv))
+			} else {
+				return nil, false, fmt.Errorf("invalid mul value: %v", f.Opts["mul"])
+			}
+		case f.Opts["div"] != "":
+			if fv, err := floats.Float64(f.Opts["div"]); err == nil {
+				ub = ub.SetMore(ub.Div(f.Name, fv))
+			} else {
+				return nil, false, fmt.Errorf("invalid div value: %v", f.Opts["div"])
+			}
+		default:
+			ub = ub.SetMore(ub.Assign(f.Name, fieldValue))
+		}
+		assigned = true
+
+	}
+
+	return ub, assigned, nil
+
 	for i := 0; i < v.NumField(); i++ {
 		field := v.Field(i)
 		fieldType := t.Field(i)

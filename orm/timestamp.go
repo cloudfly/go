@@ -3,6 +3,7 @@ package orm
 import (
 	"database/sql/driver"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -26,6 +27,10 @@ func (t Timestamp) MarshalJSON() ([]byte, error) {
 // 坑：传入 JSON null 会得到 1970-01-01（json 把 null 解析为 0），不会报错，也不会
 // 保留零值语义。
 func (t *Timestamp) UnmarshalJSON(content []byte) error {
+	if content == nil {
+		*t = Timestamp(time.Time{})
+		return nil
+	}
 	var unix int64
 	if err := json.Unmarshal(content, &unix); err != nil {
 		return err
@@ -38,6 +43,9 @@ func (t *Timestamp) UnmarshalJSON(content []byte) error {
 //
 // 零值会被转换为 0001-01-01 的时间，MySQL 通常不接受，请确保字段已赋值。
 func (t Timestamp) Value() (driver.Value, error) {
+	if time.Time(t).IsZero() {
+		return nil, nil
+	}
 	return time.Time(t), nil
 }
 
@@ -46,10 +54,10 @@ func (t Timestamp) Value() (driver.Value, error) {
 // 支持 time.Time、string 和 []byte，格式为 "2006-01-02 15:04:05"，
 // 可带小数秒（如 "2006-01-02 15:04:05.123456"）。
 //
-// 坑：src 为 nil 或其他类型时不会报错，字段保持原值（零值场景容易漏掉错误数据）；
-// 字符串格式不匹配时会返回解析错误。
+// NULL 会把字段置为零值；其他不支持的类型返回错误，字符串格式不匹配时也会返回错误。
 func (t *Timestamp) Scan(src interface{}) error {
 	if src == nil {
+		*t = Timestamp{}
 		return nil
 	}
 	switch v := src.(type) {
@@ -70,7 +78,7 @@ func (t *Timestamp) Scan(src interface{}) error {
 		*t = Timestamp(_t)
 		return nil
 	}
-	return nil
+	return fmt.Errorf("orm: Timestamp.Scan unsupported type %T", src)
 }
 
 // Unix 返回 Unix 秒数。

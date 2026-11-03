@@ -286,8 +286,9 @@ func (b *InsertBuilder) SQL(suffix string) *InsertBuilder {
 //
 // 没有设置模式时默认使用 "INSERT INTO"；没有任何 Values 时只生成 "INSERT INTO table"。
 func (b *InsertBuilder) Build() (string, []any) {
-	if b.mode == "" {
-		b.mode = "INSERT INTO"
+	mode := b.mode
+	if mode == "" {
+		mode = "INSERT INTO"
 	}
 	var (
 		args  []any
@@ -299,7 +300,7 @@ func (b *InsertBuilder) Build() (string, []any) {
 			lines = append(lines, "("+placeholders(len(row))+")")
 		}
 	}
-	statement := b.mode + " " + b.table
+	statement := mode + " " + b.table
 	if len(b.cols) > 0 {
 		statement += " (" + strings.Join(b.cols, ", ") + ")"
 	}
@@ -439,74 +440,5 @@ func (b *DeleteBuilder) Build() (string, []any) {
 	if len(b.where) > 0 {
 		statement += " WHERE " + strings.Join(b.where, " AND ")
 	}
-	return statement, b.Cond.args
-}
-
-// In 把 query 中的 "?" 按参数中的切片展开为多个占位符，行为类似 sqlx.In。
-//
-// 支持的切片类型：[]any、[]int64、[]int、[]string、[]int32、[]int16、[]int8、
-// []uint64、[]uint32。其他类型的切片不会展开，会作为一个整体参数传入。
-//
-// 坑：
-//   - 空切片会被替换为字面量 NULL，因此 "IN (NULL)" 和 "NOT IN (NULL)" 都匹配不到
-//     任何行，需要“空集合”语义时请显式改写；
-//   - 占位符数量与参数数量不匹配时返回错误，不会自动补齐。
-func In(query string, args ...any) (string, []any, error) {
-	var (
-		builder strings.Builder
-		out     = make([]any, 0, len(args))
-		argIdx  int
-	)
-	for i := 0; i < len(query); i++ {
-		if query[i] != '?' {
-			builder.WriteByte(query[i])
-			continue
-		}
-		if argIdx >= len(args) {
-			return "", nil, fmt.Errorf("missing argument for placeholder at position %d", i)
-		}
-		values, ok := sliceValues(args[argIdx])
-		if !ok {
-			builder.WriteByte('?')
-			out = append(out, args[argIdx])
-			argIdx++
-			continue
-		}
-		if len(values) == 0 {
-			builder.WriteString("NULL")
-			argIdx++
-			continue
-		}
-		builder.WriteString(placeholders(len(values)))
-		out = append(out, values...)
-		argIdx++
-	}
-	if argIdx != len(args) {
-		return "", nil, fmt.Errorf("expected %d arguments, got %d", argIdx, len(args))
-	}
-	return builder.String(), out, nil
-}
-
-func sliceValues(v any) ([]any, bool) {
-	switch value := v.(type) {
-	case []any:
-		return value, true
-	case []int64:
-		return Any2Slice(value), true
-	case []int:
-		return Any2Slice(value), true
-	case []string:
-		return Any2Slice(value), true
-	case []int32:
-		return Any2Slice(value), true
-	case []int16:
-		return Any2Slice(value), true
-	case []int8:
-		return Any2Slice(value), true
-	case []uint64:
-		return Any2Slice(value), true
-	case []uint32:
-		return Any2Slice(value), true
-	}
-	return nil, false
+	return statement, append([]any{}, b.Cond.args...)
 }

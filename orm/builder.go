@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+
+	"github.com/cloudfly/go/str"
 )
 
 const (
@@ -36,23 +38,31 @@ func Build(ctx context.Context, b Builder) (string, []any) {
 // e/eq/equal、ne/neq、gt、gte、lt、lte、in、notin、like、notlike。
 // 未写 op 时，切片值生成 IN 条件，其余生成 = 条件。
 //
-// 坑：
-//   - 零值字段会被跳过，因此无法用结构体过滤 status=0、count=0 这类零值，请改用 KVs；
-//   - data 为 nil、非结构体或零值结构体时返回空切片，调用方需自行判断是否还要执行 SQL；
-//   - 字段 tag 中的 `type:timestamp` 会先做时间类型转换。
+// 注意：
+//   - nil value 字段会被跳过， 如果有需要判断 column IS NULL，请改用 KVs；
 func WhereFromStruct(c *Cond, data any, dst []string, opts ...*Option) []string {
-	opt := optionFrom(nil, opts)
+	opt := optionFrom(context.Background(), opts)
 	if data == nil {
-		return []string{}
+		return dst
 	}
 	v := dereferencedValue(reflect.ValueOf(data))
-	t := dereferencedType(reflect.TypeOf(data))
 	if !v.IsValid() || v.IsZero() {
-		return []string{}
+		return dst
 	}
+	t := v.Type()
 	if t.Kind() != reflect.Struct {
-		return []string{}
+		return dst
 	}
+
+	for _, f := range structFields(t, getTagName(opt)) {
+		fv := fieldValueByIndex(v, f.Index)
+		if !fv.IsValid() || fv.IsNil() {
+			continue
+		}
+		fieldValue := convertValueByDBType(fieldValueAny(fv), f.Opts["type"])
+		dst = appendWhereExpr(c, dst, f.Name, fieldValue, f.Field.Tag.Get("op"))
+	}
+
 	for i := 0; i < v.NumField(); i++ {
 		field := v.Field(i)
 		fieldType := t.Field(i)
@@ -78,12 +88,10 @@ func WhereFromStruct(c *Cond, data any, dst []string, opts ...*Option) []string 
 // 与结构体过滤不同，KVs 不会跳过零值，因此适合过滤 status=0 这类场景。
 func WhereFromKVs(c *Cond, filter KVs, dst []string) []string {
 	if filter == nil {
-		return []string{}
+		return dst
 	}
 	for _, kv := range filter {
-		colName := kv.Key
-		fieldValue := kv.Value
-		dst = appendWhereExpr(c, dst, colName, fieldValue, kv.Extra)
+		dst = appendWhereExpr(c, dst, kv.Key, kv.Value, kv.Extra)
 	}
 	return dst
 }
@@ -92,22 +100,20 @@ func WhereFromKVs(c *Cond, filter KVs, dst []string) []string {
 //
 // filter 支持以下形式：
 //   - KVs：按 KV.Extra 指定的操作符生成条件；
+//   - map[string]any： 转换成 KVs 类型处理;
 //   - struct：跳过零值字段生成条件；
 //   - slice：转换为主键 IN (...)；
 //   - 其他单值：转换为主键 = ?。
-//
-// 坑：
-//   - filter 为 nil 或零值结构体时不会生成任何条件。DeleteWhere/PatchWhere 会因此
-//     报错以保护数据；Count/Exist 则会把“无过滤条件”当作全表统计/判断；
-//   - KVs 由 []KV 推导表名会得到 "kv"（不会报错，但表名是错误的），单值/ map 通常
-//     直接报错；这些场景必须用 opt.Table 显式指定表名。
 func WhereFrom(c *Cond, filter any, dst []string, opts ...*Option) []string {
-	opt := optionFrom(nil, opts)
+	opt := optionFrom(context.Background(), opts)
 	if filter == nil {
 		return dst
 	}
 	if kvs, ok := filter.(KVs); ok {
 		return WhereFromKVs(c, kvs, dst)
+	}
+	if m, ok := filter.(map[string]any); ok {
+		return WhereFromKVs(c, KVsFromMap(nil, m), dst)
 	}
 	t := dereferencedType(reflect.TypeOf(filter))
 	if kind := t.Kind(); kind == reflect.Struct {
@@ -188,14 +194,12 @@ func ValidateTableName(name string) error {
 //
 // 指针、切片和数组都会被逐层解引用，因此 []*User 与 &[]User 都能得到 "user"。
 //
-// 坑：
+// 注意：
 //   - 表名必须是合法标识符，否则返回错误；非结构体（如 int64、KVs、map）推导出的
 //     名字通常非法，应改用 opt.Table 显式指定；
-//   - 结构体名转表名使用 snake_case，而字段名默认只做 strings.ToLower（例如 UserID
-//     默认列名是 "userid" 而不是 "user_id"），二者规则不同；
-//   - 前缀判断使用字符串前缀匹配，不做 schema 语义判断。
+//   - 前缀判断使用字符串前缀匹配， 如果表名已包含前缀，则不添加。
 func TableName(d any, opts ...*Option) (string, error) {
-	opt := optionFrom(nil, opts)
+	opt := optionFrom(context.Background(), opts)
 	// generate table name from structure name of d
 	var (
 		name        string
@@ -220,13 +224,12 @@ func TableName(d any, opts ...*Option) (string, error) {
 				switch t.Kind() {
 				case reflect.Struct:
 					structName := t.Name()
-					name = snakeCase(structName)
+					name = str.SnakeCase(structName)
 				default:
 					name = fmt.Sprintf("%v", d)
 				}
 			}
 		}
-
 	}
 
 	if name == "" {
@@ -241,64 +244,6 @@ func TableName(d any, opts ...*Option) (string, error) {
 		return "", err
 	}
 	return name, nil
-}
-
-// ColNamesWithTagOpt 返回结构体字段的列名列表，每项形如 "table.column"。
-//
-// d 必须是结构体或结构体指针；其他类型返回空切片且不返回错误。tag 为空时返回全部
-// 可导出字段；tag 非空时只保留 tag 选项中含有该 key 的字段，例如 tag="insert"
-// 对应 `db:",insert"`。
-//
-// 注意：列名不会做 Escape，直接拼接进 SQL 时请确认表名/列名可信。
-func ColNamesWithTagOpt(d interface{}, tag string, opts ...*Option) ([]string, error) {
-	opt := optionFrom(nil, opts)
-	vt := reflect.TypeOf(d)
-	if vt == nil {
-		return []string{}, nil
-	}
-	if vt.Kind() == reflect.Ptr {
-		vt = vt.Elem()
-	}
-	if vt.Kind() != reflect.Struct {
-		return []string{}, nil
-	}
-	table, err := TableName(d, opt)
-	if err != nil {
-		return nil, err
-	}
-	var cols []string
-	for i := 0; i < vt.NumField(); i++ {
-		field := vt.Field(i)
-		name, after := ColNameFromTag(field, getTagName(opt))
-		if name == "" {
-			continue
-		}
-		if tag != "" {
-			if opts := ParseOptionStr(after); opts != nil {
-				if _, ok := opts[tag]; !ok {
-					continue
-				}
-			}
-		}
-		cols = append(cols, table+"."+name)
-	}
-	return cols, nil
-}
-
-// snakeCase converts a CamelCase identifier to snake_case.
-func snakeCase(name string) string {
-	b := &strings.Builder{}
-	for i := 0; i < len(name); i++ {
-		c := name[i]
-		if c >= 'A' && c <= 'Z' {
-			if i > 0 && name[i-1] != '_' && !(name[i-1] >= 'A' && name[i-1] <= 'Z') {
-				b.WriteByte('_')
-			}
-			c += 'a' - 'A'
-		}
-		b.WriteByte(c)
-	}
-	return b.String()
 }
 
 // ColNameFromTag 解析结构体字段的列名和 tag 附加选项。
@@ -338,4 +283,134 @@ func getTagName(opt *Option) string {
 		return opt.tagName
 	}
 	return DefaultTagName
+}
+
+// structField 描述一个参与 SQL 生成的叶子字段。
+type structField struct {
+	// Name 是列名（已按 tag/字段名规则解析）。
+	Name string
+	// Index 是到达该字段的 reflect 索引链，用于处理匿名嵌入结构体。
+	Index []int
+	// Field 是叶子字段的类型信息，可从中读取 `op` tag。
+	Field reflect.StructField
+	// Opts 是 tag 中列名之后的选项，例如 `db:",insert,type:timestamp"`。
+	Opts map[string]string
+}
+
+// flatFields 按与结果扫描相同的规则展开结构体字段：匿名嵌入结构体（或显式
+// `db:",inline"`）会被展开，`db:"-"` 与非导出字段会被跳过。
+func structFields(t reflect.Type, tagName string) []structField {
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return nil
+	}
+	return walkStructFields(t, nil, tagName, nil)
+}
+
+func walkStructFields(t reflect.Type, dst []structField, tagName string, prefix []int) []structField {
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		if field.PkgPath != "" && !field.Anonymous {
+			continue
+		}
+		index := make([]int, len(prefix)+1)
+		copy(index, prefix)
+		index[len(prefix)] = i
+
+		tag, hasTag := field.Tag.Lookup(tagName)
+		name, after, _ := strings.Cut(tag, ",")
+		if name == "-" {
+			continue
+		}
+
+		ft := field.Type
+		for ft.Kind() == reflect.Ptr {
+			ft = ft.Elem()
+		}
+
+		inline := (name == "" && strings.Contains(after, "inline")) || (name == "" && !hasTag && field.Anonymous)
+		if inline && ft.Kind() == reflect.Struct {
+			dst = walkStructFields(ft, dst, tagName, index)
+			continue
+		}
+		if !field.IsExported() || ft.Kind() == reflect.Func || ft.Kind() == reflect.Chan {
+			continue
+		}
+		if name == "" {
+			name = str.SnakeCase(field.Name)
+		}
+		dst = append(dst, structField{
+			Name:  name,
+			Index: index,
+			Field: field,
+			Opts:  ParseOptionStr(after),
+		})
+	}
+	return dst
+}
+
+// fieldValueByIndex 沿索引链读取字段值；遇到 nil 指针时返回零值（invalid Value），
+// 由调用方按“未设置”处理。它不会为嵌入指针分配内存。
+func fieldValueByIndex(v reflect.Value, index []int) reflect.Value {
+	for _, i := range index {
+		for v.Kind() == reflect.Ptr {
+			if v.IsNil() {
+				return reflect.Value{}
+			}
+			v = v.Elem()
+		}
+		v = v.Field(i)
+	}
+	return v
+}
+
+// fieldValueAny 把字段值解引用后转为 any；nil 指针/接口或不可导出字段返回 nil。
+func fieldValueAny(v reflect.Value) any {
+	for v.Kind() == reflect.Ptr || v.Kind() == reflect.Interface {
+		if v.IsNil() {
+			return nil
+		}
+		v = v.Elem()
+	}
+	if !v.CanInterface() {
+		return nil
+	}
+	return v.Interface()
+}
+
+// ColNamesWithTagOpt 返回结构体字段的列名列表，每项形如 "table.column"。
+//
+// d 必须是结构体或结构体指针；其他类型返回空切片且不返回错误。dbOption 为空时返回全部
+// 可导出字段；dbOption 非空时只保留 db 选项中含有该 key 的字段，例如 dbOption="insert"
+// 对应 `db:",insert"`。
+//
+// dbTag 的默认值为 DefaultTagName，即 "db"。
+func ColNamesWithTagOpt(d interface{}, dbOption string, dbTag string) ([]string, error) {
+	vt := reflect.TypeOf(d)
+	if vt == nil {
+		return []string{}, nil
+	}
+	for vt.Kind() == reflect.Ptr {
+		vt = vt.Elem()
+	}
+	if vt.Kind() != reflect.Struct {
+		return []string{}, nil
+	}
+	if dbTag == "" {
+		dbTag = DefaultTagName
+	}
+
+	var cols []string
+
+	for _, f := range structFields(vt, dbTag) {
+		if dbOption != "" {
+			if _, ok := f.Opts[dbOption]; !ok {
+				continue
+			}
+		}
+		cols = append(cols, f.Name)
+	}
+	return cols, nil
 }

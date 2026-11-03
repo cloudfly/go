@@ -147,12 +147,10 @@ func InsertOne(ctx context.Context, data any, opts ...*Option) (int64, error) {
 //
 // 表名和列名只从 data[0] 解析，因此所有元素必须是相同的结构体类型。
 //
-// 坑：
+// 注意：
 //   - 完全为零值（v.IsZero()）的结构体行会被跳过；如果所有行都被跳过则返回
 //     "no values to insert"；
 //   - 单个字段为零值时仍会正常写入零值，不会跳过；
-//   - 字段 tag 中的 `type:timestamp` 会先做时间转换；
-//   - 指针为 nil 的字段会以类型化 nil 传入驱动，实际写入 NULL 还是报错取决于驱动。
 func NewInsertBuilderFromStruct(ctx context.Context, data []any, opts ...*Option) (*InsertBuilder, error) {
 	if len(data) <= 0 {
 		return nil, fmt.Errorf("no data to insert")
@@ -168,60 +166,46 @@ func NewInsertBuilderFromStruct(ctx context.Context, data []any, opts ...*Option
 
 	// 使用第一个数据的类型，获取列名信息。
 	var (
-		ib   = NewInsertBuilder().InsertInto(table)
-		t    = dereferencedType(reflect.TypeOf(data[0]))
-		cols []string
+		ib           = NewInsertBuilder().InsertInto(table)
+		t            = dereferencedType(reflect.TypeOf(data[0]))
+		cols         []string
+		insertFields []structField
 	)
 	if t.Kind() != reflect.Struct {
 		return nil, fmt.Errorf("data type must be struct")
 	}
 
-	fieldTags := make([]string, t.NumField())
-	for i := 0; i < t.NumField(); i++ {
-		fieldType := t.Field(i)
-		name, after := ColNameFromTag(fieldType, getTagName(opt))
-		if name == "" {
-			continue
-		}
-		opts := ParseOptionStr(after)
-		if _, ok := opts["insert"]; !ok {
-			continue
-		}
-		cols = append(cols, name)
-
-		if t := opts["type"]; t != "" {
-			fieldTags[i] = t
-		} else {
-			fieldTags[i] = "-"
+	for _, f := range structFields(t, getTagName(opt)) {
+		if _, ok := f.Opts["insert"]; ok {
+			insertFields = append(insertFields, f)
+			cols = append(cols, f.Name)
 		}
 	}
 
 	if len(cols) == 0 {
 		return nil, fmt.Errorf(`no insert field defined in '%s' type, defined db:",insert" for insert field`, t.Name())
 	}
-
 	ib.Cols(cols...)
 
 	lines := 0
 	for _, item := range data {
-		var (
-			v    = dereferencedValue(reflect.ValueOf(item))
-			vals []any
-		)
+		if item == nil {
+			// ignore the nil item in data array
+			continue
+		}
+		v := dereferencedValue(reflect.ValueOf(item))
 		if !v.IsValid() || v.IsZero() {
 			continue
 		}
-		for i := 0; i < v.NumField(); i++ {
-			field := v.Field(i)
-			if fieldTags[i] != "" {
-				if field.IsNil() {
-					vals = append(vals, nil)
-				} else if rv := dereferencedValue(field); rv.IsValid() && rv.CanInterface() {
-					vals = append(vals, convertValueByDBType(rv.Interface(), fieldTags[i]))
-				} else {
-					vals = append(vals, reflect.New(dereferencedType(field.Type())).Interface())
-				}
+
+		vals := make([]any, 0, len(cols))
+		for _, f := range insertFields {
+			fv := fieldValueByIndex(v, f.Index)
+			if !fv.IsValid() || fv.IsNil() {
+				vals = append(vals, nil)
+				continue
 			}
+			vals = append(vals, fieldValueAny(fv))
 		}
 
 		ib.Values(vals...)

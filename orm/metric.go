@@ -25,49 +25,50 @@ func emitMetric(ctx context.Context, sql string) {
 	if h == nil || *h == nil {
 		return
 	}
-
-	write := false
-	if i := indexFold(sql, " FROM "); i > 0 {
-		write = indexFold(sql, "DELETE") >= 0
-		sql = strings.TrimSpace(sql[i+6:])
-	} else if j := indexFold(sql, " INTO "); j > 0 {
-		write = true
-		sql = strings.TrimSpace(sql[j+6:])
-	} else if k := indexFold(sql, "UPDATE "); k >= 0 {
-		write = true
-		sql = strings.TrimSpace(sql[k+7:])
-	} else {
+	sql = strings.TrimSpace(sql)
+	if sql == "" {
 		return
 	}
 
-	var tableName string
-	if i := strings.IndexByte(sql, ' '); i < 0 {
-		tableName = sql
-		sql = ""
-	} else {
+	var (
+		write     = false
+		upper     = strings.ToUpper(sql)
+		tableName string
+	)
+
+	switch {
+	case strings.HasPrefix(upper, "INSERT"), strings.HasPrefix(upper, "REPLACE"):
+		write = true
+		if idx := strings.Index(upper, " INTO "); idx > 0 {
+			sql = strings.TrimSpace(sql[idx+6:])
+		}
+	case strings.HasPrefix(upper, "UPDATE"):
+		write = true
+		sql = strings.TrimSpace(sql[7:])
+	case strings.HasPrefix(upper, "DELETE"):
+		write = true
+		if idx := strings.Index(upper, " FROM "); idx > 0 {
+			sql = strings.TrimSpace(sql[idx+6:])
+		}
+	case strings.HasPrefix(upper, "SELECT"):
+		if idx := strings.Index(upper, " FROM "); idx > 0 {
+			sql = strings.TrimSpace(sql[idx+6:])
+		}
+		return
+	default:
+		return
+	}
+
+	if i := strings.IndexAny(sql, " \n\t\r("); i >= 0 {
 		tableName = sql[:i]
 		sql = sql[i+1:]
 	}
+
+	tableName = strings.Trim(tableName, "` ")
+
 	if tableName != "" {
 		(*h).Emit(ctx, tableName, write)
 	}
-	if sql != "" {
-		emitMetric(ctx, sql)
-	}
-
-}
-
-// indexFold returns the index of substr in s, ignoring ASCII letter case.
-//
-// It scans the original string so the returned index can be used to slice s
-// without changing the case of identifiers such as table names.
-func indexFold(s, substr string) int {
-	for i := 0; i+len(substr) <= len(s); i++ {
-		if strings.EqualFold(s[i:i+len(substr)], substr) {
-			return i
-		}
-	}
-	return -1
 }
 
 // SetMetricHandler 设置全局指标回调。
@@ -76,7 +77,8 @@ func indexFold(s, substr string) int {
 // 的会覆盖先设置的。
 func SetMetricHandler(h MetricHandler) {
 	if h == nil {
-		return
+		metricHandler.Store(nil)
+	} else {
+		metricHandler.Store(&h)
 	}
-	metricHandler.Store(&h)
 }

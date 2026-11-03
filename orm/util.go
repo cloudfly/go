@@ -17,7 +17,8 @@ import (
 //   - 纯数字字符串；
 //   - float/int/uint/json.Number 等数值，按 Unix 秒解析。
 //
-// 数值会自动兼容毫秒/微秒/纳秒：当数值 >= 9000000000 时反复除以 10，直到落在秒级范围。
+// 数值会自动兼容毫秒/微秒/纳秒：按数值量级分别除以 1000、1000000、1000000000，
+// 秒级数值（包括 2255 年之后的秒数）保持原值。
 //
 // 坑：
 //   - 数值 0 一律视为无效，返回 false，无法表示 1970-01-01；
@@ -38,6 +39,10 @@ func Any2Time(i any) (time.Time, bool) {
 	switch value := i.(type) {
 	case string:
 		if n, err := strconv.ParseInt(value, 10, 64); err == nil {
+			num = n
+		}
+	case []byte:
+		if n, err := strconv.ParseInt(string(value), 10, 64); err == nil {
 			num = n
 		}
 	case float64:
@@ -64,10 +69,21 @@ func Any2Time(i any) (time.Time, bool) {
 	if num == 0 {
 		return time.Time{}, false
 	}
-	for num >= 9000000000 {
-		num /= 10
+
+	return time.Unix(normalizeUnixSeconds(num), 0), true
+}
+
+// normalizeUnixSeconds 按数值量级把纳秒/微秒/毫秒时间戳归一化为秒。
+func normalizeUnixSeconds(num int64) int64 {
+	switch {
+	case num >= 1e17: // 纳秒
+		return num / 1e9
+	case num >= 1e14: // 微秒
+		return num / 1e6
+	case num >= 1e11: // 毫秒
+		return num / 1e3
 	}
-	return time.Unix(num, 0), true
+	return num
 }
 
 func dereferencedValue(v reflect.Value) reflect.Value {
@@ -79,6 +95,9 @@ func dereferencedValue(v reflect.Value) reflect.Value {
 }
 
 func dereferencedType(t reflect.Type) reflect.Type {
+	if t == nil {
+		return nil
+	}
 	for k := t.Kind(); k == reflect.Ptr || k == reflect.Interface; k = t.Kind() {
 		t = t.Elem()
 	}
@@ -86,6 +105,9 @@ func dereferencedType(t reflect.Type) reflect.Type {
 }
 
 func dereferencedElemType(t reflect.Type) reflect.Type {
+	if t == nil {
+		return nil
+	}
 	k := t.Kind()
 	for k == reflect.Ptr || k == reflect.Array || k == reflect.Slice {
 		t = t.Elem()
@@ -174,42 +196,41 @@ func IsDuplicate(err error) bool {
 //   - "k1:v1,k2:v2" -> {"k1":"v1", "k2":"v2"}
 //   - "k1,k2"       -> {"k1":"", "k2":""}
 //   - "k1:v2,k2"    -> {"k1":"v2", "k2":""}
+//   - `k1:a\,b`     -> {"k1":"a,b"}
 //
-// 逗号可以用 "\," 转义后作为值的一部分。
-//
-// 坑：值中不能包含 ':'，第一个 ':' 之后的内容会作为值，后续 ':' 会被静默丢弃；
-// 空 key 会被忽略。
+// 逗号可以用 `\,` 转义后作为 key 或 value 的一部分。key 以第一个未转义的 ':' 分隔，
+// ':' 之后的内容（包括后续的 ':'）全部作为 value；空 key 会被忽略。
 func ParseOptionStr(str string) map[string]string {
 	options := map[string]string{}
+	if str == "" {
+		return options
+	}
 
-	kb, vb, stage := &strings.Builder{}, &strings.Builder{}, 'k'
+	var part strings.Builder
+	flush := func() {
+		if part.Len() == 0 {
+			return
+		}
+		k, v, _ := strings.Cut(part.String(), ":")
+		part.Reset()
+		if k != "" {
+			options[k] = v
+		}
+	}
+
 	for i := 0; i < len(str); i++ {
-		b := kb
-		if stage == 'v' {
-			b = vb
-		}
-		if str[i] == '\\' && i < len(str)-1 && str[i+1] == ',' {
-			b.WriteByte(',')
+		if str[i] == '\\' && i+1 < len(str) && str[i+1] == ',' {
+			part.WriteByte(',')
 			i++
-		}
-		if str[i] == ':' {
-			stage = 'v'
 			continue
-		} else if str[i] == ',' {
-			if k, v := kb.String(), vb.String(); k != "" {
-				options[k] = v
-			}
-			stage = 'k'
-			kb.Reset()
-			vb.Reset()
-		} else {
-			b.WriteByte(str[i])
 		}
+		if str[i] == ',' {
+			flush()
+			continue
+		}
+		part.WriteByte(str[i])
 	}
-
-	if k, v := kb.String(), vb.String(); k != "" {
-		options[k] = v
-	}
+	flush()
 
 	return options
 }

@@ -362,6 +362,29 @@ func DecodeId(prefix string, s string) (uint64, error) {
 	return DecodeIdWithKey(prefix, s, []byte(strings.Repeat("12345678", 4)))
 }
 
+// SnakeCase converts a CamelCase identifier to snake_case.
+//
+// 连续的大写字母会被视为一个缩写，并在缩写与后续单词之间插入下划线，
+// 例如 "HTTPClient" -> "http_client"、"UserID" -> "user_id"。
+func SnakeCase(name string) string {
+	b := &strings.Builder{}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c >= 'A' && c <= 'Z' {
+			if i > 0 && name[i-1] != '_' {
+				prevUpper := name[i-1] >= 'A' && name[i-1] <= 'Z'
+				nextLower := i+1 < len(name) && name[i+1] >= 'a' && name[i+1] <= 'z'
+				if !prevUpper || nextLower {
+					b.WriteByte('_')
+				}
+			}
+			c += 'a' - 'A'
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
 var (
 	varChars     = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._"
 	varCharTable [128]bool

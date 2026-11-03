@@ -151,15 +151,17 @@ func runInTableLock(ctx context.Context, table, mode string, f func(ctx context.
 // 执行连接的选取优先级：ctx 中的事务 > ctx 中的锁定连接 > 主库连接池。
 // sql 与 args 原样交给驱动，本函数不做任何校验或转义。
 func Exec(ctx context.Context, sql string, args ...interface{}) (driver.Result, error) {
-	slog.InfoContext(ctx, "Executing sql query", "query", sql, "args", args)
+	slog.DebugContext(ctx, "Executing sql query", "query", sql, "args", args)
 	emitMetric(ctx, sql)
-	if tx := Opt(ctx).GetTx(); tx != nil {
+
+	opt := Opt(ctx)
+	if tx := opt.GetTx(); tx != nil {
 		return tx.ExecContext(ctx, sql, args...)
 	}
 	if conn := connFromContext(ctx); conn != nil {
 		return conn.ExecContext(ctx, sql, args...)
 	}
-	db, err := Opt(ctx).db(true)
+	db, err := opt.db(true)
 	if err != nil {
 		return nil, err
 	}

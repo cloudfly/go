@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"reflect"
-	"strings"
 	"sync"
 )
 
@@ -18,6 +17,8 @@ type DB struct {
 }
 
 // NewDB 包装一个已存在的 *sql.DB。
+//
+// The argument db must be non-nil. Otherwise it will raise panic on the method invocation.
 //
 // 传入 nil 会返回非 nil 的 *DB，但后续调用会因空指针而 panic。
 func NewDB(db *sql.DB) *DB {
@@ -135,7 +136,11 @@ func scanAll(ctx context.Context, rows *sql.Rows, dest any) error {
 				return err
 			}
 			if len(values) == 1 {
-				elem.Set(reflect.Append(elem, reflect.ValueOf(values[0])))
+				v := reflect.ValueOf(values[0])
+				if !v.IsValid() {
+					v = reflect.Zero(elemType)
+				}
+				elem.Set(reflect.Append(elem, v))
 			} else {
 				elem.Set(reflect.Append(elem, reflect.ValueOf(values)))
 			}
@@ -182,14 +187,14 @@ func scanStruct(ctx context.Context, rows *sql.Rows, v reflect.Value) error {
 	if err != nil {
 		return err
 	}
-	fields := structFields(ctx, v.Type())
+	fieldMap := scanStructFields(ctx, v.Type())
 	dests := make([]any, len(columns))
 	for i, column := range columns {
-		index, ok := fields[column]
+		f, ok := fieldMap[column]
 		if !ok {
 			return fmt.Errorf("missing destination name %s in %s", column, v.Type())
 		}
-		field, err := fieldByIndex(v, index)
+		field, err := fieldByIndex(v, f.Index)
 		if err != nil {
 			return err
 		}
@@ -224,51 +229,16 @@ type fieldCacheKey struct {
 
 var fieldCache sync.Map // fieldCacheKey -> map[string][]int
 
-func structFields(ctx context.Context, t reflect.Type) map[string][]int {
-	key := fieldCacheKey{typ: t, tagName: getTagName(Opt(ctx))}
+func scanStructFields(ctx context.Context, t reflect.Type) map[string]structField {
+	tagName := getTagName(Opt(ctx))
+	key := fieldCacheKey{typ: t, tagName: tagName}
 	if cached, ok := fieldCache.Load(key); ok {
-		return cached.(map[string][]int)
+		return cached.(map[string]structField)
 	}
-	fields := make(map[string][]int)
-	collectFields(ctx, t, nil, fields)
+	fields := make(map[string]structField)
+	for _, f := range structFields(t, tagName) {
+		fields[f.Name] = f
+	}
 	fieldCache.Store(key, fields)
 	return fields
-}
-
-func collectFields(ctx context.Context, t reflect.Type, prefix []int, fields map[string][]int) {
-	for t.Kind() == reflect.Ptr {
-		t = t.Elem()
-	}
-	if t.Kind() != reflect.Struct {
-		return
-	}
-	tagName := getTagName(Opt(ctx))
-	for i := 0; i < t.NumField(); i++ {
-		field := t.Field(i)
-		if field.PkgPath != "" && !field.Anonymous {
-			continue
-		}
-		index := make([]int, len(prefix)+1)
-		copy(index, prefix)
-		index[len(prefix)] = i
-
-		tag, hasTag := field.Tag.Lookup(tagName)
-		name, opts, _ := strings.Cut(tag, ",")
-		if name == "-" {
-			continue
-		}
-		ft := field.Type
-		for ft.Kind() == reflect.Ptr {
-			ft = ft.Elem()
-		}
-		inline := (name == "" && strings.Contains(opts, "inline")) || (name == "" && !hasTag && field.Anonymous)
-		if inline && ft.Kind() == reflect.Struct {
-			collectFields(ctx, ft, index, fields)
-			continue
-		}
-		if name == "" {
-			name = strings.ToLower(field.Name)
-		}
-		fields[name] = index
-	}
 }

@@ -13,12 +13,13 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sync/atomic"
 	"time"
 )
 
 // CacheProvider 是 GetByID 使用的缓存抽象。
 //
-// 调用方需要自行决定序列化格式：Set 写入的 content 会被 GetByID 用
+// orm 使用 encoding/json 对数据进行序列化：Set 写入的 content 会被 GetByID 用
 // encoding/json.Unmarshal 反序列化到目标结构体，因此 content 必须是目标结构体的
 // JSON 表示。Update/Delete 接口会调用 Remove/RemoveAll 失效缓存。
 //
@@ -43,9 +44,7 @@ type CacheProvider interface {
 // "orm: DBProvider is required"。
 type DBProvider func(isMaster bool) *sql.DB
 
-var (
-	gopt *Option = &Option{}
-)
+var gopt atomic.Pointer[Option]
 
 // InitGlobalOption 设置全局 Option，供未显式传入 opt 的调用使用。
 //
@@ -55,9 +54,9 @@ var (
 // 传入 nil 会重置为空 Option，此时后续调用会因为缺少 DBProvider 而失败。
 func InitGlobalOption(opt *Option) error {
 	if opt == nil {
-		gopt = &Option{}
+		gopt.Store(&Option{})
 	} else {
-		gopt = opt.Copy()
+		gopt.Store(opt.Copy())
 	}
 	return nil
 }
@@ -115,7 +114,7 @@ func Opt(ctx context.Context) *Option {
 			return v.(*Option).Copy()
 		}
 	}
-	return gopt.Copy()
+	return gopt.Load().Copy()
 }
 
 // optionFrom 解析可选参数 opt：取第一个非 nil 的值；未传入或全部为 nil 时回退到
@@ -125,6 +124,9 @@ func optionFrom(ctx context.Context, opts []*Option) *Option {
 		if opt != nil {
 			return opt
 		}
+	}
+	if ctx == nil {
+		return gopt.Load().Copy()
 	}
 	return Opt(ctx)
 }
@@ -149,15 +151,16 @@ func (opt *Option) Copy() *Option {
 //   - 实现了 Table() string 接口的值：调用 Table() 获取表名。
 //
 // 其他类型会被静默忽略，不会报错。传入空字符串也不会清空已有表名。
-//
-// 坑：当过滤条件不是结构体（如 int64、KVs、map）时，TableName 无法从条件推导表名，
-// 必须显式调用 Table 设置，否则会返回 “table name is empty”。
 func (opt *Option) Table(value any) *Option {
+	var name string
 	switch data := value.(type) {
 	case string:
-		opt.table = data
+		name = data
 	case interface{ Table() string }:
-		opt.table = data.Table()
+		name = data.Table()
+	}
+	if ValidateTableName(name) == nil {
+		opt.table = name
 	}
 	return opt
 }
