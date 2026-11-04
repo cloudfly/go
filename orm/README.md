@@ -8,7 +8,7 @@
 2. UserFilter: 代表用户查询条件，专门用于 `GetWhere`, `SelectWhere` 过滤数据。
 3. UserPatch: 代表用户更新数据，专门用于通过 `PatchByID`, `PatchWhere` 更新数据。
 
-其中 XXXFilter 和 XXXPatch 都是定义明确的 structure，其内部字段均应该使用**指针类型**。 当字段值为 nil 时候，则会再 `Where` 和 `Update` 中被忽略；非 `nil` 场景即便字段值为零值，也会被考虑在内 如 `age = 0` 或 `phone = ''`。
+其中 XXXFilter 和 XXXPatch 都是定义明确的 structure，其内部字段均应该使用**指针类型**。 当字段值为 nil 时候，则会在 `Where` 和 `Update` 中被忽略；非 `nil` 场景即便字段值为零值，也会被考虑在内 如 `age = 0` 或 `phone = ''`。
 
 ## 快速开始
 
@@ -27,12 +27,12 @@ type User struct {
 func (*User) Table() string { return "users" }
 
 type UserFilter struct {
-	ID        *int64          `db:"id"`
-	Name      *string         `db:"name",op:"like"`
-	AgeGt     *int            `db:"age",op:"gt"`
-	AgeLt     *int            `db:"age",op:"lt"`
-	Status    []int            `db:"status",opt:"in"`
-	NotStatus    []int            `db:"status",opt:"notin"`
+	ID        *int64 `db:"id"`
+	Name      *string `db:"name" op:"like"`
+	AgeGt     *int    `db:"age" op:"gt"`
+	AgeLt     *int    `db:"age" op:"lt"`
+	Status    []int   `db:"status" op:"in"`
+	NotStatus []int   `db:"status" op:"notin"`
 }
 
 func (*UserFilter) Table() string { return "users" }
@@ -55,14 +55,12 @@ func (*UserPatch) Table() string { return "users" }
 var master, slave *sql.DB
 
 orm.SetGlobalOption(
-	&orm.Option{
-		DBProvider: func(isMaster bool) *sql.DB {
-			if isMaster {
-				return master
-			}
-			return slave
-		},
-	}
+	orm.Opt(nil).DBProvider(func(isMaster bool) *sql.DB {
+		if isMaster {
+			return master
+		}
+		return slave
+	}),
 )
 ```
 
@@ -86,7 +84,7 @@ var list []User
 ctx = orm.Opt(ctx).Sorts("-id").Page(1, 20).With(ctx)
 err = orm.SelectWhere(ctx, &list, UserFilter{Status: []int{1}})
 
-// 按主键更新非零字段
+// 按主键更新非 nil 字段
 err = orm.PatchByID(ctx, int64(1), &UserPatch{Name: orm.Ptr("jerry")})
 
 // 条件更新，返回受影响行数
@@ -95,7 +93,7 @@ n, err := orm.PatchWhere(ctx, &UserPatch{Status: orm.Ptr(2)}, UserFilter{AgeGt: 
 // 按主键删除（必须显式指定表名）
 err = orm.DeleteByID(orm.Opt(ctx).Table("users").With(ctx), int64(1))
 
-// 条件删除（KVs 无法推导表名，必须显式指定表）
+// 条件删除（表名由 filter 的 Table() 推导）
 err = orm.DeleteWhere(ctx, &UserFilter{Status: []int{0}})
 
 // 统计与存在性判断
@@ -118,7 +116,7 @@ err = orm.InsertIgnore(ctx, []any{&User{Name: "a"}}) // 冲突行忽略
 | --- | --- |
 | `db:"name"` | 列名为 `name` |
 | `db:"-"` | 忽略该字段 |
-| （不写 tag） | 列名为字段名的小写形式，如 `UserID` -> `userid`（**不会**转下划线） |
+| （不写 tag） | 列名为字段名的 snake_case，如 `UserID` -> `user_id` |
 | `db:",insert"` | 参与插入；**没有该选项的字段不会被插入** |
 | `db:",select:-"` | 查询时排除该列（也支持 `select:false`） |
 | `db:",incr"` / `decr` | 更新时生成 `col = col ± 1` |
@@ -134,8 +132,8 @@ err = orm.InsertIgnore(ctx, []any{&User{Name: "a"}}) // 冲突行忽略
 `filter` 支持五种形式：
 
 ```go
-// 1. struct：非零字段生成 AND 条件，字段可用 op tag 指定操作符
-&User{Name: "tom"} // name = 'tom'
+// 1. struct：非 nil 字段生成 AND 条件（指针字段为 nil 时跳过），字段可用 op tag 指定操作符
+&UserFilter{Name: orm.Ptr("tom")} // name LIKE '%tom%'
 
 // 2. KV：单条 AND 条件
 orm.KV{Key: "name", Value: "tom"} // name = 'tom'
@@ -162,7 +160,8 @@ err := orm.RunTx(ctx, func(ctx context.Context) error {
 	if _, err := orm.InsertOne(ctx, &User{Name: "tom"}); err != nil {
 		return err
 	}
-	return orm.PatchWhere(ctx, &UserPatch{Status: orm.Ptr(1)}, orm.KVs{{Key: "name", Value: "tom"}})
+	_, err := orm.PatchWhere(ctx, &UserPatch{Status: orm.Ptr(1)}, orm.KVs{{Key: "name", Value: "tom"}})
+	return err
 })
 ```
 
@@ -212,12 +211,14 @@ opt := orm.Opt(ctx).CacheProvider(myCache) // 传 nil 关闭缓存
 ## 自定义 SQL 与 Builder
 
 ```go
-sql, args := orm.Build(ctx, orm.NewSelectBuilder().
+// Builder 的 Where 只接受已经拼好的表达式；直接拼接时需自行处理 SQL 注入风险。
+b := orm.NewSelectBuilder().
 	Select("id", "name").
 	From("users").
-	Where("status = ?", 1).
+	Where("`status` = 1").
 	OrderBy("-id").
-	Limit(10))
+	Limit(10)
+sql, args := b.Build()
 
 var users []User
 err := orm.Select(ctx, &users, sql, args...)
@@ -227,14 +228,12 @@ err := orm.Select(ctx, &users, sql, args...)
 // 条件表达式 + 参数
 b := orm.NewUpdateBuilder().Update("users")
 b = b.SetMore(b.Assign("name", "tom"))
-b = b.Where(b.E("id", 1))
+b = b.Where("`id` = 1")
 sql, args := b.Build()
 ```
 
-```go
-// 原始 SQL 中的切片参数展开（类似 sqlx.In）
-query, args, err := orm.In(orm.Raw("SELECT * FROM users WHERE id IN (?)"), []int64{1, 2, 3})
-```
+> 说明：`SelectBuilder`/`UpdateBuilder`/`DeleteBuilder` 的 `Where` 只接收表达式字符串，
+> 参数通过 `Assign` 等 builder 方法收集；直接拼接表达式时请自行处理 SQL 注入风险。
 
 - 自定义 SQL表达式时，调用者需要自行处理 SQL 注入风险。
 

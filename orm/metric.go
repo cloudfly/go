@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"sync/atomic"
+
+	"github.com/cloudfly/go/types"
 )
 
 // MetricHandler 接收 SQL 执行指标回调。
@@ -61,6 +63,9 @@ func emitMetric(ctx context.Context, sql string) {
 	if i := strings.IndexAny(sql, " \n\t\r("); i >= 0 {
 		tableName = sql[:i]
 		sql = sql[i+1:]
+	} else {
+		// 表名位于语句末尾（如 "SELECT * FROM users"）时没有后续分隔符。
+		tableName = sql
 	}
 
 	tableName = unescapeIdentifier(tableName)
@@ -89,7 +94,7 @@ func unescapeIdentifier(identifier string) string {
 //
 // 传入 nil 会 禁用 metric 功能.
 func SetMetricHandler(h MetricHandler) {
-	if h == nil {
+	if types.IsNil(h) {
 		metricHandler.Store(nil)
 	} else {
 		metricHandler.Store(&h)

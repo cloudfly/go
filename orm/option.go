@@ -115,9 +115,8 @@ type optionCtxKey struct{}
 // 同一个实现；如果实现本身有状态，并发使用需要自行保证安全。
 func Opt(ctx context.Context) *Option {
 	if ctx != nil {
-		v := ctx.Value(optionCtxKey{})
-		if v != nil {
-			return v.(*Option).Copy()
+		if o, ok := ctx.Value(optionCtxKey{}).(*Option); ok && o != nil {
+			return o.Copy()
 		}
 	}
 	return gopt.Load().Copy()
@@ -150,6 +149,10 @@ func (opt *Option) Table(value any) *Option {
 		name = data
 	case interface{ Table() string }:
 		name = data.Table()
+	}
+	if name == "" {
+		// 空字符串或不支持的类型不改变已有表名。
+		return opt
 	}
 	opt.table = name
 	return opt

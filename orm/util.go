@@ -15,7 +15,7 @@ import (
 // Any2Time 尝试把常见的时间表示转换为 time.Time。
 //
 // 支持：
-//   - 实现了 Time() time.Time 接口的值（如 sql.NullTime）；
+//   - 实现了 Time() time.Time 接口的值；
 //   - 纯数字字符串；
 //   - float/int/uint/json.Number 等数值，按 Unix 秒解析。
 //

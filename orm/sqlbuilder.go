@@ -129,7 +129,7 @@ func (c *condition) NotLike(column string, value any) {
 }
 
 func placeholders(n int) string {
-	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
+	return strings.TrimSuffix(strings.Repeat("?, ", n), ", ")
 }
 
 // Escape 用反引号包裹标识符，适用于 MySQL。

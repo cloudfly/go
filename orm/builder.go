@@ -259,7 +259,9 @@ func TableName(ctx context.Context, d any) (string, error) {
 		return "", fmt.Errorf("orm: table name is empty, use Option.Table() to set it")
 	}
 
-	name = tablePrefix + name
+	if tablePrefix != "" && !strings.HasPrefix(name, tablePrefix) {
+		name = tablePrefix + name
+	}
 	if err := ValidateTableName(name); err != nil {
 		return "", err
 	}

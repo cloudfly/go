@@ -190,7 +190,7 @@ func Exec(ctx context.Context, sql string, args ...interface{}) (driver.Result, 
 // 从库，否则使用主库。
 //
 // 坑：结构体扫描要求结果集的每一列都能在结构体中找到对应字段（默认按 tag 或字段名
-// 小写匹配），否则返回 "missing destination name" 错误。
+// 的 snake_case 匹配），否则返回 "missing destination name" 错误。
 func Select(ctx context.Context, dest interface{}, sql string, args ...interface{}) error {
 	opt := Opt(ctx)
 	fromMaster := opt.fromMaster

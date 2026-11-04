@@ -33,7 +33,7 @@ func GetByID[ID comparable](ctx context.Context, dst any, id ID) error {
 	if err != nil {
 		return err
 	}
-	if opt.tx == nil && !opt.fromMaster && opt.cacheProvider != nil && connFromContext(ctx) == nil {
+	if cacheEnabled(ctx, opt) {
 		// Not reading data from the primary database indicates that some delay is tolerable.
 		// Attempt to read from the cache provider.
 		if content, ok := opt.cacheProvider.Get(table, id); ok && len(content) > 0 {
@@ -66,7 +66,7 @@ func GetByID[ID comparable](ctx context.Context, dst any, id ID) error {
 		return err
 	}
 
-	if opt.cacheProvider != nil {
+	if cacheEnabled(ctx, opt) {
 		content, err := json.Marshal(dst)
 		if err != nil {
 			slog.WarnContext(ctx, "Failed to marshal data for cacheing", "error", err, "query", statement, "args", args)
@@ -293,6 +293,15 @@ func NewSelectBuilderFromStruct(ctx context.Context, data any) (*SelectBuilder, 
 		b = b.Select(cols...)
 	}
 	return b, nil
+}
+
+// cacheEnabled 判断当前调用是否允许读写缓存。
+//
+// 事务中、指定 FromMaster 或处于表锁固定连接内时都不使用缓存：事务中可能读到未提交
+// 数据或写入脏缓存，主库/锁定连接则应当读取最新数据。
+func cacheEnabled(ctx context.Context, opt *Option) bool {
+	return opt != nil && opt.cacheProvider != nil &&
+		opt.tx == nil && !opt.fromMaster && connFromContext(ctx) == nil
 }
 
 func getCacheTTL(opt *Option) time.Duration {
